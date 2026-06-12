@@ -1,0 +1,10 @@
+.git
+.env
+__pycache__
+**/__pycache__
+*.db
+exports/
+tests/
+*.docx
+продолжи
+_read_docx.py

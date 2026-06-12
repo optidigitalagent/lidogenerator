@@ -1,0 +1,294 @@
+# -*- coding: utf-8 -*-
+"""Telegram-бот Lead Hunter.
+
+Команды:
+  /start  — приветствие и инструкция
+  /search — новый поиск: ниша (кнопки) → город (текст) → количество (кнопки) → запуск
+  /status — статус текущего/последнего поиска
+  /export — прислать CSV последней задачи
+  /stop   — остановить текущий поиск
+
+Тексты бота — на украинском. Запуск: python bot.py
+"""
+
+import asyncio
+import logging
+from pathlib import Path
+
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
+
+import config
+import db
+import orchestrator
+
+logging.basicConfig(
+    format="%(asctime)s %(name)s %(levelname)s: %(message)s", level=logging.INFO
+)
+# Не спамим логи запросами к Telegram API
+logging.getLogger("httpx").setLevel(logging.WARNING)
+log = logging.getLogger("lead_hunter.bot")
+
+# Состояния диалога /search
+NICHE, CITY, COUNT, CONFIRM = range(4)
+
+# Кнопки ниш: (подпись, значение для поиска в Maps)
+NICHES = [
+    ("💅 Салон краси", "салон краси"),
+    ("✂️ Барбершоп", "барбершоп"),
+    ("🍽 Ресторан", "ресторан"),
+    ("🔧 СТО", "СТО"),
+    ("🧖 Спа", "спа салон"),
+    ("👗 Одяг", "магазин одягу"),
+    ("✏️ Інше", "__custom__"),
+]
+
+COUNTS = [50, 100, 200]
+
+# Активные поиски: chat_id -> {"task_id", "stop_event", "asyncio_task"}
+ACTIVE: dict = {}
+
+
+# ---------- /start ----------
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Привіт! Я Lead Hunter — шукаю бізнеси без сайтів у Google Maps.\n\n"
+        "Що я вмію:\n"
+        "📍 збираю бізнеси з Google Maps (назва, телефон, адреса)\n"
+        "🔍 перевіряю, чи є в них сайт\n"
+        "📱 перевіряю, чи живий Instagram\n"
+        "🤖 оцінюю кожен лід через AI\n"
+        "📊 віддаю готову таблицю CSV\n\n"
+        "Команди:\n"
+        "/search — почати новий пошук\n"
+        "/status — статус поточного пошуку\n"
+        "/export — завантажити CSV останнього пошуку\n"
+        "/stop — зупинити пошук"
+    )
+
+
+# ---------- Диалог /search ----------
+
+async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    chat_id = update.effective_chat.id
+    if chat_id in ACTIVE and not ACTIVE[chat_id]["asyncio_task"].done():
+        await update.message.reply_text(
+            "⏳ Пошук уже виконується. Зупини його командою /stop або дочекайся завершення."
+        )
+        return ConversationHandler.END
+
+    keyboard = [
+        [InlineKeyboardButton(label, callback_data=f"niche:{value}")]
+        for label, value in NICHES
+    ]
+    await update.message.reply_text(
+        "Обери нішу для пошуку:", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return NICHE
+
+
+async def on_niche(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    value = query.data.split(":", 1)[1]
+    if value == "__custom__":
+        await query.edit_message_text("Напиши нішу текстом (наприклад: «стоматологія»):")
+        return NICHE
+    context.user_data["niche"] = value
+    await query.edit_message_text(f"Ніша: {value}\n\nТепер напиши місто (наприклад: «Харків»):")
+    return CITY
+
+
+async def on_custom_niche(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["niche"] = update.message.text.strip()
+    await update.message.reply_text("Тепер напиши місто (наприклад: «Харків»):")
+    return CITY
+
+
+async def on_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["city"] = update.message.text.strip()
+    keyboard = [[
+        InlineKeyboardButton(f"{n} бізнесів", callback_data=f"count:{n}") for n in COUNTS
+    ]]
+    await update.message.reply_text(
+        "Скільки бізнесів зібрати?", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return COUNT
+
+
+async def on_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data["count"] = int(query.data.split(":", 1)[1])
+    niche = context.user_data["niche"]
+    city = context.user_data["city"]
+    count = context.user_data["count"]
+    keyboard = [[InlineKeyboardButton("🚀 Запустити", callback_data="go")]]
+    await query.edit_message_text(
+        f"Перевір налаштування:\n\n"
+        f"Ніша: {niche}\nМісто: {city}\nКількість: {count}\n\n"
+        f"Орієнтовний час: 30–90 хвилин.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CONFIRM
+
+
+async def on_go(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+    niche = context.user_data["niche"]
+    city = context.user_data["city"]
+    count = context.user_data["count"]
+
+    task_id = db.create_task(niche, city, count, chat_id=chat_id)
+    stop_event = asyncio.Event()
+
+    async def send_progress(text: str):
+        try:
+            await context.bot.send_message(chat_id, text)
+        except Exception:
+            log.exception("Не удалось отправить прогресс в чат %s", chat_id)
+
+    async def run():
+        try:
+            csv_path = await orchestrator.run_search(
+                task_id, progress_callback=send_progress, stop_event=stop_event
+            )
+            if csv_path:
+                with open(csv_path, "rb") as f:
+                    await context.bot.send_document(
+                        chat_id, f, filename=Path(csv_path).name,
+                        caption="📊 Таблиця лідів готова!",
+                    )
+        except Exception:
+            log.exception("Поиск %s завершился ошибкой", task_id)
+        finally:
+            ACTIVE.pop(chat_id, None)
+
+    ACTIVE[chat_id] = {
+        "task_id": task_id,
+        "stop_event": stop_event,
+        "asyncio_task": asyncio.create_task(run()),
+    }
+
+    await query.edit_message_text(
+        f"🚀 Запущено! Шукаю «{niche}» у місті {city} ({count} бізнесів).\n"
+        f"Чекай ~30–90 хв. Прогрес надсилатиму кожні 3 хвилини.\n"
+        f"Зупинити: /stop"
+    )
+    return ConversationHandler.END
+
+
+async def cancel_search_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Скасовано. Почати знову: /search")
+    return ConversationHandler.END
+
+
+# ---------- /status ----------
+
+STATUS_TEXT = {
+    "new": "🕐 У черзі",
+    "collecting": "📍 Збираю бізнеси з Google Maps...",
+    "checking": "🔍 Перевіряю сайти та Instagram...",
+    "scoring": "🤖 AI оцінює ліди...",
+    "done": "✅ Завершено",
+    "error": "❌ Помилка",
+    "stopped": "⏹ Зупинено",
+}
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    task = db.get_last_task(update.effective_chat.id)
+    if task is None:
+        await update.message.reply_text("Пошуків ще не було. Почни з /search")
+        return
+    status = STATUS_TEXT.get(task["status"], task["status"])
+    await update.message.reply_text(
+        f"Пошук #{task['id']}: «{task['niche']}» у місті {task['city']}\n"
+        f"Статус: {status}\n"
+        f"Створено: {task['created_at']}"
+        + (f"\nЗавершено: {task['finished_at']}" if task["finished_at"] else "")
+    )
+
+
+# ---------- /export ----------
+
+async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    task = db.get_last_task(update.effective_chat.id)
+    if task is None or not task["csv_path"]:
+        await update.message.reply_text("Готового CSV ще немає. Спочатку заверши пошук: /search")
+        return
+    path = Path(task["csv_path"])
+    if not path.exists():
+        await update.message.reply_text("Файл CSV не знайдено на диску. Запусти новий пошук.")
+        return
+    with open(path, "rb") as f:
+        await update.message.reply_document(f, filename=path.name, caption="📊 Твоя таблиця лідів")
+
+
+# ---------- /stop ----------
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    active = ACTIVE.get(chat_id)
+    if not active or active["asyncio_task"].done():
+        await update.message.reply_text("Зараз нічого не виконується.")
+        return
+    active["stop_event"].set()
+    await update.message.reply_text("⏹ Зупиняю пошук... Збережу те, що вже зібрано.")
+
+
+# ---------- Запуск ----------
+
+def main():
+    if not config.TELEGRAM_TOKEN:
+        raise SystemExit(
+            "Не задано TELEGRAM_TOKEN.\n"
+            "1. Створи бота через @BotFather у Telegram\n"
+            "2. Скопіюй .env.example у .env та встав токен"
+        )
+
+    db.init_db()
+
+    app = Application.builder().token(config.TELEGRAM_TOKEN).build()
+
+    search_conv = ConversationHandler(
+        entry_points=[CommandHandler("search", cmd_search)],
+        states={
+            NICHE: [
+                CallbackQueryHandler(on_niche, pattern=r"^niche:"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, on_custom_niche),
+            ],
+            CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_city)],
+            COUNT: [CallbackQueryHandler(on_count, pattern=r"^count:")],
+            CONFIRM: [CallbackQueryHandler(on_go, pattern=r"^go$")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_search_dialog)],
+    )
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(search_conv)
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("export", cmd_export))
+    app.add_handler(CommandHandler("stop", cmd_stop))
+
+    log.info("Бот запущено. Зупинка: Ctrl+C")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
