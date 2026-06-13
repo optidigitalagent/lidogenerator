@@ -109,29 +109,56 @@ async def run_search(
         active = sum(1 for b in businesses if b.instagram_active)
         await progress.update("insta", f"📱 Instagram перевірено: {active} активних ✅", force=True)
 
-        # --- Этап 4: AI-скоринг ---
+        # --- Этап 4: строгая фильтрация лидов ---
+        # Лид = є Instagram І (сайту немає АБО сайт поганий).
+        # Бізнеси з нормальним сайтом і без Instagram відсіюються.
+        leads = [b for b in businesses if b.is_lead]
+
+        total = len(businesses)
+        no_instagram = sum(1 for b in businesses if not b.instagram_url)
+        skipped_good = sum(
+            1 for b in businesses if b.instagram_url and b.website_status == "good website"
+        )
+        added_no_site = sum(1 for b in leads if b.website_status == "no website")
+        added_bad_site = sum(1 for b in leads if b.website_status == "bad website")
+
+        await progress.update(
+            "filter",
+            f"🧹 Відбір: {len(leads)} лідів "
+            f"(❌ {skipped_good} з гарним сайтом, ❌ {no_instagram} без Instagram)",
+            force=True,
+        )
+
+        # --- Этап 5: AI-скоринг (тільки лідів; не впливає на відбір) ---
         db.update_task_status(task_id, "scoring")
 
-        async def on_score(done: int, total: int):
-            await progress.update("score", f"🤖 AI-оцінка: {done}/{total}...")
+        async def on_score(done: int, total_: int):
+            await progress.update("score", f"🤖 AI-оцінка: {done}/{total_}...")
 
-        await ai_scorer.score_businesses(businesses, progress_callback=on_score)
+        await ai_scorer.score_businesses(leads, progress_callback=on_score)
 
-        # Сохраняем результаты проверок в базу
+        # Сохраняем результаты проверок в базу (всі бізнеси — для історії)
         for b in businesses:
             db.update_business(b)
 
-        # --- Этап 5: экспорт CSV ---
-        csv_path = reporter.export_csv(businesses, task_id=task_id)
+        # --- Этап 6: экспорт CSV (тільки лідів) ---
+        csv_path = reporter.export_csv(leads, task_id=task_id)
         db.update_task_status(task_id, "done", csv_path=csv_path)
 
-        hot = sum(1 for b in businesses if b.ai_priority == "hot")
+        # Підсумок + короткий список лідів
         await progress.update(
             "done",
-            f"✅ Готово! Знайдено {len(businesses)} бізнесів → {no_site} без сайту → "
-            f"🔥 {hot} гарячих лідів",
+            f"✅ Готово!\n"
+            f"Знайдено всього: {total}\n"
+            f"Пропущено (гарний сайт): {skipped_good}\n"
+            f"Пропущено (без Instagram): {no_instagram}\n"
+            f"Додано без сайту: {added_no_site}\n"
+            f"Додано з поганим сайтом: {added_bad_site}\n"
+            f"➡️ Усього лідів у таблиці: {len(leads)}",
             force=True,
         )
+        if progress_callback and leads:
+            await progress_callback(reporter.format_leads_summary(leads))
         return csv_path
 
     except SearchStopped:

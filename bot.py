@@ -65,13 +65,13 @@ ACTIVE: dict = {}
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Привіт! Я Lead Hunter — шукаю бізнеси без сайтів у Google Maps.\n\n"
-        "Що я вмію:\n"
-        "📍 збираю бізнеси з Google Maps (назва, телефон, адреса)\n"
-        "🔍 перевіряю, чи є в них сайт\n"
-        "📱 перевіряю, чи живий Instagram\n"
-        "🤖 оцінюю кожен лід через AI\n"
-        "📊 віддаю готову таблицю CSV\n\n"
+        "👋 Привіт! Я Lead Hunter — шукаю бізнеси, яким потрібен сайт.\n\n"
+        "Кого я залишаю в таблиці:\n"
+        "✅ є Instagram І немає сайту\n"
+        "✅ є Instagram І сайт дуже поганий\n"
+        "❌ бізнеси з нормальним сайтом — пропускаю\n"
+        "❌ бізнеси без Instagram — пропускаю\n\n"
+        "Таблиця коротка: Назва · Місто · Instagram · Статус сайту\n\n"
         "Команди:\n"
         "/search — почати новий пошук\n"
         "/status — статус поточного пошуку\n"

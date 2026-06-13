@@ -22,8 +22,8 @@ class Business:
     reviews_count: int = 0              # количество отзывов на Maps
 
     # --- результаты site_checker ---
-    has_site: bool = False              # есть ли живой сайт
-    site_quality: str = "none"          # none / unknown / old / bad / good
+    has_site: bool = False              # есть ли живой собственный сайт
+    site_quality: str = "none"          # none (нет) / dead (не открывается) / bad / good
 
     # --- результаты social_checker ---
     instagram_active: bool = False      # активен ли Instagram
@@ -38,6 +38,32 @@ class Business:
 
     # --- служебное ---
     task_id: Optional[int] = None       # id задачи поиска
+
+    @property
+    def website_status(self) -> str:
+        """Короткий статус сайта для таблицы и Telegram.
+
+        no website  — сайта нет вообще, либо вместо сайта соцсеть/агрегатор,
+                      либо указанный сайт не открывается (none / dead).
+        bad website — сайт есть, но старый/слабый/неадаптивный (лид).
+        good website — современный нормальный сайт (такой бизнес отсеивается).
+        """
+        if self.has_site and self.site_quality == "good":
+            return "good website"
+        if self.has_site and self.site_quality == "bad":
+            return "bad website"
+        return "no website"
+
+    @property
+    def is_lead(self) -> bool:
+        """Лид = есть Instagram И (сайта нет ИЛИ сайт плохой).
+
+        Бизнес с хорошим сайтом отсеивается, даже если Instagram отличный.
+        Бизнес без Instagram отсеивается — связываться будем через Instagram.
+        """
+        if not self.instagram_url:
+            return False
+        return self.website_status in ("no website", "bad website")
 
     def to_dict(self) -> dict:
         """Словарь для записи в базу/CSV."""

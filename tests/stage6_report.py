@@ -16,36 +16,36 @@ from models import Business
 def main():
     data = json.loads((Path(__file__).parent / "stage5_result.json").read_text(encoding="utf-8"))
     items = [Business(**d) for d in data]
-    # Делаем разные оценки, чтобы проверить сортировку
-    for i, b in enumerate(items):
-        b.ai_score = 30 + i * 15
 
     path = export_csv(items, task_id=999)
     print(f"CSV создан: {path}")
+
+    # Сколько из набора реально являются лидами (есть IG и нет/плохой сайт)
+    expected_leads = [b for b in items if b.is_lead]
 
     # Проверка 1: файл начинается с BOM
     raw = Path(path).read_bytes()
     assert raw.startswith(b"\xef\xbb\xbf"), "Нет BOM в начале файла"
     print("BOM: есть")
 
-    # Проверка 2: колонки читаются обратно и совпадают с заголовками
+    # Проверка 2: ровно 4 колонки и точные заголовки ТЗ
     with open(path, encoding="utf-8-sig", newline="") as f:
         rows = list(csv.reader(f, delimiter=";"))
     headers = rows[0]
     assert headers == [h for h, _ in COLUMNS], f"Заголовки не совпадают: {headers}"
-    assert len(rows) == len(items) + 1, "Число строк не совпадает"
-    assert all(len(r) == len(COLUMNS) for r in rows), "Число колонок в строках не совпадает"
-    print(f"Колонки: {len(headers)} шт., строк данных: {len(rows) - 1}")
+    assert headers == ["Business Name", "City", "Instagram URL", "Website Status"], headers
+    assert all(len(r) == 4 for r in rows), "В каждой строке должно быть 4 колонки"
+    print(f"Колонки: {headers}")
 
-    # Проверка 3: сортировка по ai_score по убыванию
-    scores = [int(r[headers.index("AI-оцінка")]) for r in rows[1:]]
-    assert scores == sorted(scores, reverse=True), f"Нет сортировки по убыванию: {scores}"
-    print(f"Сортировка по score: {scores}")
+    # Проверка 3: в CSV только лиды (хорошие сайты и без IG отсеяны)
+    assert len(rows) - 1 == len(expected_leads), \
+        f"В CSV {len(rows) - 1} строк, а лидов {len(expected_leads)}"
+    print(f"Строк данных (лидов): {len(rows) - 1} из {len(items)} бизнесов")
 
-    # Проверка 4: кириллица не побилась
-    assert any("Харків" in cell or "краси" in cell for r in rows[1:] for cell in r), \
-        "Кириллица не найдена в данных"
-    print("Кириллица: читается")
+    # Проверка 4: статус только из разрешённых значений
+    statuses = {r[3] for r in rows[1:]}
+    assert statuses <= {"no website", "bad website"}, f"Лишние статусы: {statuses}"
+    print(f"Статусы сайтов в таблице: {statuses or '∅'}")
 
     print("\nТЕСТ ПРОЙДЕН")
 
