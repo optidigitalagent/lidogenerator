@@ -121,10 +121,12 @@ async def on_custom_niche(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def on_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["city"] = update.message.text.strip()
     keyboard = [[
-        InlineKeyboardButton(f"{n} бізнесів", callback_data=f"count:{n}") for n in COUNTS
+        InlineKeyboardButton(f"{n} лідів", callback_data=f"count:{n}") for n in COUNTS
     ]]
     await update.message.reply_text(
-        "Скільки бізнесів зібрати?", reply_markup=InlineKeyboardMarkup(keyboard)
+        "Скільки якісних лідів потрібно зібрати?\n"
+        "(це кількість лідів у таблиці, а не кількість переглянутих бізнесів)",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return COUNT
 
@@ -139,7 +141,9 @@ async def on_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     keyboard = [[InlineKeyboardButton("🚀 Запустити", callback_data="go")]]
     await query.edit_message_text(
         f"Перевір налаштування:\n\n"
-        f"Ніша: {niche}\nМісто: {city}\nКількість: {count}\n\n"
+        f"Ніша: {niche}\nМісто: {city}\nПотрібно лідів: {count}\n\n"
+        f"Шукатиму, поки не набереться {count} якісних лідів "
+        f"(або поки не закінчаться результати).\n"
         f"Орієнтовний час: 30–90 хвилин.",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -186,7 +190,7 @@ async def on_go(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     }
 
     await query.edit_message_text(
-        f"🚀 Запущено! Шукаю «{niche}» у місті {city} ({count} бізнесів).\n"
+        f"🚀 Запущено! Шукаю {count} якісних лідів: «{niche}» у місті {city}.\n"
         f"Чекай ~30–90 хв. Прогрес надсилатиму кожні 3 хвилини.\n"
         f"Зупинити: /stop"
     )

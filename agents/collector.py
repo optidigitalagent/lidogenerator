@@ -10,7 +10,7 @@ import asyncio
 import random
 import re
 import urllib.parse
-from typing import Awaitable, Callable, List, Optional
+from typing import AsyncIterator, Awaitable, Callable, List, Optional
 
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout, async_playwright
 
@@ -54,48 +54,6 @@ async def _accept_consent(page: Page) -> None:
             continue
         except Exception:
             continue
-
-
-async def _scroll_results(page: Page, count: int) -> List[str]:
-    """Скроллить список результатов слева, пока не наберём count ссылок на карточки."""
-    feed = page.locator('div[role="feed"]')
-    await feed.wait_for(state="visible", timeout=20000)
-
-    links: List[str] = []
-    stale_rounds = 0  # сколько скроллов подряд без новых результатов
-
-    while len(links) < count and stale_rounds < 8:
-        # Собираем ссылки на карточки бизнесов (a.hfpxzc — ссылка карточки в списке)
-        hrefs = await page.eval_on_selector_all(
-            'div[role="feed"] a.hfpxzc', "els => els.map(e => e.href)"
-        )
-        new_links = [h for h in hrefs if h not in links]
-        if new_links:
-            links.extend(new_links)
-            stale_rounds = 0
-        else:
-            stale_rounds += 1
-
-        if len(links) >= count:
-            break
-
-        # Скроллим панель результатов вниз
-        await feed.evaluate("el => el.scrollBy(0, el.scrollHeight)")
-        await asyncio.sleep(random.uniform(1.5, 3.0))
-
-        # Если Google показал "конец списка" — выходим
-        try:
-            end = await page.locator('div[role="feed"] span.HlvSq').count()
-            if end > 0:
-                hrefs = await page.eval_on_selector_all(
-                    'div[role="feed"] a.hfpxzc', "els => els.map(e => e.href)"
-                )
-                links = list(dict.fromkeys(hrefs))
-                break
-        except Exception:
-            pass
-
-    return links[:count]
 
 
 async def _extract_business(page: Page, url: str, niche: str, city: str) -> Optional[Business]:
@@ -169,24 +127,61 @@ async def _extract_business(page: Page, url: str, niche: str, city: str) -> Opti
     return b
 
 
-async def collect(
+def _dedup_key(b: Business) -> tuple:
+    """Ключ дедупликации бизнеса: название + адрес + Instagram URL.
+
+    Защищает от дублей, которые Google Maps иногда показывает несколько раз
+    (один и тот же бизнес под разными ссылками карточки).
+    """
+    return (
+        b.name.strip().lower(),
+        b.address.strip().lower(),
+        b.instagram_url.strip().lower(),
+    )
+
+
+# Колбэк потокового сбора: принимает (просмотрено бизнесов).
+StreamProgressCallback = Callable[[int], Awaitable[None]]
+
+
+async def collect_stream(
     niche: str,
     city: str,
-    count: int,
-    progress_callback: Optional[ProgressCallback] = None,
+    batch_size: Optional[int] = None,
+    max_businesses: Optional[int] = None,
+    max_scroll_rounds: Optional[int] = None,
+    progress_callback: Optional[StreamProgressCallback] = None,
     stop_flag: Optional[Callable[[], bool]] = None,
-) -> List[Business]:
-    """Собрать до count бизнесов из Google Maps по запросу "{niche} {city}".
+) -> AsyncIterator[List[Business]]:
+    """Асинхронный генератор: отдаёт бизнесы из Google Maps батчами.
 
-    progress_callback(собрано, всего) — вызывается после каждой карточки.
-    stop_flag() -> True — досрочная остановка (команда /stop).
+    Держит браузер открытым: одна вкладка (feed_page) остаётся на странице
+    результатов и постепенно прокручивается, вторая (card_page) поочерёдно
+    открывает карточки бизнесов. После накопления batch_size уникальных
+    бизнесов отдаёт их батчем (yield) и продолжает. Последний батч может быть
+    меньше batch_size.
+
+    Останавливается, когда:
+      - просмотрено max_businesses бизнесов (safety-лимит);
+      - сделано max_scroll_rounds прокруток списка (safety-лимит);
+      - COLLECT_STALE_ROUNDS прокруток подряд не дали новых карточек
+        (результаты Google Maps закончились);
+      - сработал stop_flag().
+
+    Дубликаты (название+адрес+Instagram, а также повтор телефона) пропускаются.
+    progress_callback(просмотрено) — вызывается после каждой открытой карточки.
     """
-    count = min(count, config.MAX_BUSINESSES)  # не больше 200 за запуск
+    batch_size = batch_size or config.COLLECT_BATCH_SIZE
+    max_businesses = max_businesses or config.MAX_BUSINESSES_PER_SEARCH
+    max_scroll_rounds = max_scroll_rounds or config.MAX_SCROLL_ROUNDS
+
     query = urllib.parse.quote(f"{niche} {city}")
     url = f"https://www.google.com/maps/search/{query}?hl=uk"
 
-    businesses: List[Business] = []
-    seen_phones = set()
+    visited_links: set = set()  # ссылки карточек, которые уже открывали
+    seen_keys: set = set()      # ключи дедупа (название+адрес+IG)
+    seen_phones: set = set()    # телефоны (доп. защита от дублей)
+    visited = 0                 # сколько карточек реально открыли
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -195,47 +190,122 @@ async def collect(
             locale="uk-UA",
             viewport={"width": 1366, "height": 900},
         )
-        page = await context.new_page()
+        feed_page = await context.new_page()   # держит список результатов
+        card_page = await context.new_page()   # открывает отдельные карточки
 
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            await _accept_consent(page)
+            await feed_page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            await _accept_consent(feed_page)
 
             # Иногда Maps сразу открывает одну карточку вместо списка
-            if "/maps/place/" in page.url:
-                b = await _extract_business(page, page.url, niche, city)
-                if b:
-                    businesses.append(b)
-                return businesses
-
-            links = await _scroll_results(page, count)
-
-            for i, link in enumerate(links):
-                if stop_flag and stop_flag():
-                    break
-                try:
-                    b = await _extract_business(page, link, niche, city)
-                except Exception:
-                    continue  # карточка не открылась — идём дальше
-                if b is None:
-                    continue
-                # Дубликаты по телефону пропускаем
-                if b.phone and b.phone in seen_phones:
-                    continue
-                if b.phone:
-                    seen_phones.add(b.phone)
-                businesses.append(b)
-
+            if "/maps/place/" in feed_page.url:
+                b = await _extract_business(card_page, feed_page.url, niche, city)
+                visited += 1
                 if progress_callback:
-                    await progress_callback(len(businesses), count)
-                if len(businesses) >= count:
+                    await progress_callback(visited)
+                if b:
+                    yield [b]
+                return
+
+            feed = feed_page.locator('div[role="feed"]')
+            await feed.wait_for(state="visible", timeout=20000)
+
+            stale_rounds = 0
+            batch: List[Business] = []
+
+            for _ in range(max_scroll_rounds):
+                if (stop_flag and stop_flag()) or visited >= max_businesses:
                     break
 
-                await _random_delay()  # пауза 3-6 сек между карточками
+                # Текущие загруженные ссылки карточек
+                hrefs = await feed_page.eval_on_selector_all(
+                    'div[role="feed"] a.hfpxzc', "els => els.map(e => e.href)"
+                )
+                new_links = [h for h in hrefs if h not in visited_links]
+                stale_rounds = 0 if new_links else stale_rounds + 1
+
+                # Открываем новые карточки на отдельной вкладке
+                for link in new_links:
+                    if (stop_flag and stop_flag()) or visited >= max_businesses:
+                        break
+                    visited_links.add(link)
+                    visited += 1
+                    try:
+                        b = await _extract_business(card_page, link, niche, city)
+                    except Exception:
+                        b = None
+                    if progress_callback:
+                        await progress_callback(visited)
+                    if b is None:
+                        continue
+                    # Защита от дублей по названию+адресу+IG и по телефону
+                    key = _dedup_key(b)
+                    if key in seen_keys:
+                        continue
+                    if b.phone and b.phone in seen_phones:
+                        continue
+                    seen_keys.add(key)
+                    if b.phone:
+                        seen_phones.add(b.phone)
+
+                    batch.append(b)
+                    if len(batch) >= batch_size:
+                        yield batch
+                        batch = []
+
+                    await _random_delay()  # пауза 3-6 сек между карточками
+
+                if visited >= max_businesses:
+                    break
+
+                # Google показал явный конец списка
+                try:
+                    if await feed_page.locator('div[role="feed"] span.HlvSq').count() > 0:
+                        break
+                except Exception:
+                    pass
+
+                # Новые результаты больше не появляются — список исчерпан
+                if stale_rounds >= config.COLLECT_STALE_ROUNDS:
+                    break
+
+                # Скроллим список вниз и ждём подгрузки
+                await feed.evaluate("el => el.scrollBy(0, el.scrollHeight)")
+                await asyncio.sleep(random.uniform(1.5, 3.0))
+
+            # Остаток (меньше batch_size) тоже отдаём
+            if batch:
+                yield batch
         finally:
             await browser.close()
 
-    return businesses
+
+async def collect(
+    niche: str,
+    city: str,
+    count: int,
+    progress_callback: Optional[ProgressCallback] = None,
+    stop_flag: Optional[Callable[[], bool]] = None,
+) -> List[Business]:
+    """Устаревший способ: собрать до count БИЗНЕСОВ (не лидов) из Google Maps.
+
+    Оставлен для совместимости (ручной запуск, старые тесты). Основной поток
+    теперь использует collect_stream + логику target_leads в оркестраторе.
+
+    progress_callback(собрано, всего) — вызывается после каждой карточки.
+    """
+    count = min(count, config.MAX_BUSINESSES)
+    businesses: List[Business] = []
+    async for batch in collect_stream(
+        niche, city, max_businesses=count, stop_flag=stop_flag
+    ):
+        for b in batch:
+            businesses.append(b)
+            if progress_callback:
+                await progress_callback(len(businesses), count)
+            if len(businesses) >= count:
+                return businesses[:count]
+    return businesses[:count]
 
 
 if __name__ == "__main__":

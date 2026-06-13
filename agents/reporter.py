@@ -50,6 +50,60 @@ def export_csv(businesses: List[Business], task_id: int = 0) -> str:
     return str(path)
 
 
+# Ширина колонок Excel (в символах) — чтобы всё было нормально видно
+EXCEL_WIDTHS = {
+    "A": 42,   # Business Name — пошире
+    "B": 20,   # City — нормальная ширина
+    "C": 40,   # Instagram URL — пошире
+    "D": 18,   # Website Status — пошире
+}
+
+
+def export_excel(businesses: List[Business], task_id: int = 0) -> str:
+    """Записать .xlsx только с лидами и нормальной шириной колонок.
+
+    Возвращает путь к файлу или "" если openpyxl недоступен (тогда работаем
+    только с CSV). Колонки те же, что в CSV.
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+    except ImportError:
+        return ""
+
+    config.EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = config.EXPORT_DIR / f"leads_task{task_id}_{stamp}.xlsx"
+
+    leads = [b for b in businesses if b.is_lead]
+    leads.sort(key=lambda b: 0 if b.website_status == "no website" else 1)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Leads"
+
+    # Заголовок
+    ws.append([header for header, _ in COLUMNS])
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="2F5496")
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(vertical="center")
+
+    # Данные
+    for b in leads:
+        ws.append([str(getter(b) or "") for _, getter in COLUMNS])
+
+    # Ширина колонок + закрепление шапки
+    for col, width in EXCEL_WIDTHS.items():
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = "A2"
+
+    wb.save(path)
+    return str(path)
+
+
 def format_leads_summary(businesses: List[Business], limit: int = 20) -> str:
     """Короткий список лидов для Telegram. Без скоринга и лишних описаний.
 

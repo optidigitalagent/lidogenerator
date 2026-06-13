@@ -58,116 +58,172 @@ async def run_search(
     stop_event: Optional[asyncio.Event] = None,
     progress_interval: int = None,
 ) -> Optional[str]:
-    """Полный цикл поиска для задачи task_id. Возвращает путь к CSV или None при остановке/ошибке."""
+    """Полный цикл поиска для задачи task_id.
+
+    Число task["count"] трактуется как target_leads — сколько ВАЛИДНЫХ ЛИДОВ
+    нужно получить в таблице (а не сколько бизнесов просмотреть). Бизнесы
+    собираются батчами из Google Maps; после каждого батча проверяются сайты и
+    отбираются лиды (є Instagram І сайту немає/сайт поганий). Сбор продолжается,
+    пока не наберём target_leads лидов либо не упрёмся в safety-лимиты.
+
+    Возвращает путь к файлу-таблице (xlsx или csv) или None при остановке/ошибке.
+    """
     task = db.get_task(task_id)
     if task is None:
         raise ValueError(f"Задача {task_id} не найдена")
 
-    niche, city, count = task["niche"], task["city"], task["count"]
+    niche, city, target_leads = task["niche"], task["city"], task["count"]
     interval = progress_interval if progress_interval is not None else config.PROGRESS_INTERVAL
     progress = _Progress(progress_callback, interval, stop_event)
-    businesses: List[Business] = []
+    stop_flag = (lambda: stop_event.is_set()) if stop_event else None
 
-    try:
-        # --- Этап 1: сбор с Google Maps ---
-        db.update_task_status(task_id, "collecting")
-        await progress.update("collect", f"📍 Шукаю «{niche}» у місті {city}...", force=True)
+    # Накопители по ходу батчевого сбора
+    leads: List[Business] = []          # валидные лиды (то, что попадёт в таблицу)
+    visited = 0                         # просмотрено бизнесов всего
+    skipped_no_instagram = 0            # пропущено: нет Instagram
+    skipped_good_site = 0               # пропущено: есть Instagram, но хороший сайт
 
-        async def on_collect(done: int, total: int):
-            await progress.update("collect", f"📍 Зібрано {done}/{total} бізнесів з Google Maps...")
-
-        stop_flag = (lambda: stop_event.is_set()) if stop_event else None
-        businesses = await collector.collect(
-            niche, city, count, progress_callback=on_collect, stop_flag=stop_flag
-        )
-        if stop_event and stop_event.is_set():
-            raise SearchStopped()
-        for b in businesses:
-            b.task_id = task_id
-        saved = db.save_businesses(businesses)
-        # Работаем дальше только с сохранёнными (без дубликатов)
-        businesses = [b for b in businesses if b.id is not None]
-        await progress.update("collect", f"📍 Зібрано {saved} бізнесів з Google Maps ✅", force=True)
-
-        # --- Этап 2: проверка сайтов ---
-        db.update_task_status(task_id, "checking")
-
-        async def on_sites(done: int, total: int):
-            await progress.update("sites", f"🔍 Перевірка сайтів: {done}/{total}...")
-
-        await site_checker.check_sites(businesses, progress_callback=on_sites)
-        no_site = sum(1 for b in businesses if not b.has_site)
-        await progress.update("sites", f"🔍 Сайти перевірено: {no_site} без сайту ✅", force=True)
-
-        # --- Этап 3: проверка Instagram ---
-        async def on_insta(done: int, total: int):
-            await progress.update("insta", f"📱 Перевірка Instagram: {done}/{total}...")
-
-        await social_checker.check_instagram(
-            businesses, progress_callback=on_insta, stop_flag=stop_flag
-        )
-        active = sum(1 for b in businesses if b.instagram_active)
-        await progress.update("insta", f"📱 Instagram перевірено: {active} активних ✅", force=True)
-
-        # --- Этап 4: строгая фильтрация лидов ---
-        # Лид = є Instagram І (сайту немає АБО сайт поганий).
-        # Бізнеси з нормальним сайтом і без Instagram відсіюються.
-        leads = [b for b in businesses if b.is_lead]
-
-        total = len(businesses)
-        no_instagram = sum(1 for b in businesses if not b.instagram_url)
-        skipped_good = sum(
-            1 for b in businesses if b.instagram_url and b.website_status == "good website"
-        )
+    def _added_counts():
         added_no_site = sum(1 for b in leads if b.website_status == "no website")
         added_bad_site = sum(1 for b in leads if b.website_status == "bad website")
+        return added_no_site, added_bad_site
 
+    async def _send_progress(force: bool = False):
+        added_no_site, added_bad_site = _added_counts()
         await progress.update(
-            "filter",
-            f"🧹 Відбір: {len(leads)} лідів "
-            f"(❌ {skipped_good} з гарним сайтом, ❌ {no_instagram} без Instagram)",
+            "main",
+            f"🔎 Шукаю {target_leads} якісних лідів: «{niche}» у місті {city}\n"
+            f"Запрошено лідів: {target_leads}\n"
+            f"Переглянуто бізнесів: {visited}\n"
+            f"Знайдено валідних лідів: {len(leads)}/{target_leads}\n"
+            f"Пропущено без Instagram: {skipped_no_instagram}\n"
+            f"Пропущено з гарним сайтом: {skipped_good_site}\n"
+            f"Додано без сайту: {added_no_site}\n"
+            f"Додано з поганим сайтом: {added_bad_site}",
+            force=force,
+        )
+
+    try:
+        db.update_task_status(task_id, "collecting")
+        await progress.update(
+            "main",
+            f"🔎 Шукаю {target_leads} якісних лідів: «{niche}» у місті {city}...",
             force=True,
         )
 
-        # --- Этап 5: AI-скоринг (тільки лідів; не впливає на відбір) ---
+        async def on_visit(v: int):
+            nonlocal visited
+            visited = v
+            if stop_event and stop_event.is_set():
+                raise SearchStopped()
+            await _send_progress()
+
+        # --- Сбор батчами + фильтрация до набора target_leads ---
+        db.update_task_status(task_id, "checking")
+        target_reached = False
+
+        async for batch in collector.collect_stream(
+            niche, city, progress_callback=on_visit, stop_flag=stop_flag
+        ):
+            if stop_event and stop_event.is_set():
+                raise SearchStopped()
+
+            # Проверяем сайты у бизнесов батча (быстро, параллельно)
+            await site_checker.check_sites(batch)
+
+            # Отбираем валидные лиды из батча
+            for b in batch:
+                if not b.instagram_url:
+                    skipped_no_instagram += 1
+                    continue
+                if b.website_status == "good website":
+                    skipped_good_site += 1
+                    continue
+                # Лид: є Instagram І (сайту немає АБО сайт поганий)
+                b.task_id = task_id
+                leads.append(b)
+
+            await _send_progress(force=True)
+
+            if len(leads) >= target_leads:
+                leads = leads[:target_leads]
+                target_reached = True
+                break
+
+        # --- Почему остановились ---
+        if stop_event and stop_event.is_set():
+            raise SearchStopped()
+        if target_reached:
+            reason = f"досягнуто цільову кількість лідів ({target_leads})"
+        elif visited >= config.MAX_BUSINESSES_PER_SEARCH:
+            reason = f"досягнуто safety-ліміт: переглянуто {visited} бізнесів"
+        else:
+            reason = "результати Google Maps вичерпано"
+
+        # --- Обогащение лидов (Instagram + AI-скоринг) — не влияет на отбор ---
         db.update_task_status(task_id, "scoring")
+        db.save_businesses(leads)  # сохраняем лиды, получаем id
 
-        async def on_score(done: int, total_: int):
-            await progress.update("score", f"🤖 AI-оцінка: {done}/{total_}...")
+        if leads:
+            async def on_insta(done: int, total_: int):
+                await progress.update("enrich", f"📱 Перевірка Instagram лідів: {done}/{total_}...")
 
-        await ai_scorer.score_businesses(leads, progress_callback=on_score)
+            await social_checker.check_instagram(
+                leads, progress_callback=on_insta, stop_flag=stop_flag
+            )
 
-        # Сохраняем результаты проверок в базу (всі бізнеси — для історії)
-        for b in businesses:
-            db.update_business(b)
+            async def on_score(done: int, total_: int):
+                await progress.update("enrich", f"🤖 AI-оцінка лідів: {done}/{total_}...")
 
-        # --- Этап 6: экспорт CSV (тільки лідів) ---
+            await ai_scorer.score_businesses(leads, progress_callback=on_score)
+
+            for b in leads:
+                db.update_business(b)
+
+        # --- Экспорт (CSV + Excel с нормальной шириной колонок) ---
         csv_path = reporter.export_csv(leads, task_id=task_id)
-        db.update_task_status(task_id, "done", csv_path=csv_path)
+        xlsx_path = reporter.export_excel(leads, task_id=task_id)
+        out_path = xlsx_path or csv_path
+        db.update_task_status(task_id, "done", csv_path=out_path)
 
-        # Підсумок + короткий список лідів
+        # --- Финальный отчёт ---
+        added_no_site, added_bad_site = _added_counts()
+        shortage = ""
+        if len(leads) < target_leads:
+            shortage = (
+                f"\n⚠️ Запрошено {target_leads} лідів, "
+                f"знайдено лише {len(leads)} підходящих."
+            )
         await progress.update(
-            "done",
+            "main",
             f"✅ Готово!\n"
-            f"Знайдено всього: {total}\n"
-            f"Пропущено (гарний сайт): {skipped_good}\n"
-            f"Пропущено (без Instagram): {no_instagram}\n"
+            f"Запрошено лідів: {target_leads}\n"
+            f"Переглянуто бізнесів: {visited}\n"
+            f"Пропущено без Instagram: {skipped_no_instagram}\n"
+            f"Пропущено з гарним сайтом: {skipped_good_site}\n"
             f"Додано без сайту: {added_no_site}\n"
             f"Додано з поганим сайтом: {added_bad_site}\n"
-            f"➡️ Усього лідів у таблиці: {len(leads)}",
+            f"➡️ Усього лідів у таблиці: {len(leads)}\n"
+            f"Причина зупинки: {reason}"
+            + shortage,
             force=True,
         )
         if progress_callback and leads:
             await progress_callback(reporter.format_leads_summary(leads))
-        return csv_path
+        return out_path
 
     except SearchStopped:
-        # Пользователь остановил поиск — сохраняем то, что успели
-        for b in businesses:
-            db.update_business(b)
+        # Пользователь остановил поиск — сохраняем то, что успели набрать
+        if leads:
+            db.save_businesses(leads)
+            for b in leads:
+                db.update_business(b)
         db.update_task_status(task_id, "stopped")
         if progress_callback:
-            await progress_callback("⏹ Пошук зупинено.")
+            await progress_callback(
+                f"⏹ Пошук зупинено. Встигли зібрати {len(leads)} лідів "
+                f"(переглянуто {visited} бізнесів)."
+            )
         return None
     except Exception as e:
         db.update_task_status(task_id, "error")
