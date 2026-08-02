@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import orchestrator
 from models import Business
+from niche_catalog import NicheSearchPlan
 from query_planner import QueryKind, QueryQueue, SearchQuery
 
 
@@ -14,7 +15,6 @@ DENTISTRY_QUERIES = (
     "стоматологія Киев",
     "стоматологическая клиника Киев",
     "стоматологічна клініка Киев",
-    "стоматолог Киев",
     "стоматологічний кабінет Киев",
     "зубная клиника Киев",
     "зубна клініка Киев",
@@ -38,7 +38,7 @@ class OrchestratorNicheVariantsTests(unittest.IsolatedAsyncioTestCase):
         target: int,
         stop_event: asyncio.Event | None = None,
         stop_after_query: str | None = None,
-        variants_mock: Mock | None = None,
+        plan_mock: Mock | None = None,
         queue_builder: Mock | None = None,
     ) -> dict:
         collector_queries: list[str] = []
@@ -96,10 +96,10 @@ class OrchestratorNicheVariantsTests(unittest.IsolatedAsyncioTestCase):
             return inner
 
         task = {"niche": niche, "city": "Киев", "count": target}
-        variants_patch = patch.object(
+        plan_patch = patch.object(
             orchestrator,
-            "get_niche_variants",
-            variants_mock or orchestrator.get_niche_variants,
+            "resolve_niche_plan",
+            plan_mock or orchestrator.resolve_niche_plan,
         )
         queue_patch = patch.object(
             orchestrator,
@@ -112,7 +112,7 @@ class OrchestratorNicheVariantsTests(unittest.IsolatedAsyncioTestCase):
             patch.object(orchestrator.db, "update_task_status", statuses),
             patch.object(orchestrator.db, "save_businesses", side_effect=capture("save")),
             patch.object(orchestrator.db, "update_business"),
-            variants_patch,
+            plan_patch,
             queue_patch,
             patch.object(orchestrator.collector, "collect_stream", new=fake_collect_stream),
             patch.object(orchestrator.site_checker, "check_sites", new=fake_check_sites),
@@ -183,15 +183,23 @@ class OrchestratorNicheVariantsTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_catalog_is_called_once_per_task(self) -> None:
-        variants = Mock(return_value=("variant",))
+        plan_resolver = Mock(
+            return_value=NicheSearchPlan(
+                key="custom",
+                input_niche="custom",
+                base_niche="custom",
+                primary_variants=("variant",),
+                fallback_variants=(),
+            )
+        )
         run = await self._run(
             niche="custom",
             streams={},
             target=1,
-            variants_mock=variants,
+            plan_mock=plan_resolver,
         )
 
-        variants.assert_called_once_with("custom")
+        plan_resolver.assert_called_once_with("custom")
         self.assertEqual(run["collector_queries"], ["custom Киев", "variant Киев"])
 
     async def test_queue_builder_receives_variants_without_districts_or_limit(self) -> None:
