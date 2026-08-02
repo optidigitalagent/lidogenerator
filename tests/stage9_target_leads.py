@@ -47,7 +47,13 @@ def _make_batch(start_idx: int, size: int) -> list:
 def _install_fakes(total_available: int, batch_size: int = 10):
     """Подменяем сеть: collect_stream отдаёт синтетику, проверки — no-op."""
 
+    source_consumed = False
+
     async def fake_collect_stream(niche, city, progress_callback=None, stop_flag=None, **kw):
+        nonlocal source_consumed
+        if source_consumed:
+            return
+        source_consumed = True
         visited = 0
         idx = 0
         while visited < total_available:

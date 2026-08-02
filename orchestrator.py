@@ -22,6 +22,7 @@ import config
 import db
 from agents import collector, site_checker, social_checker, ai_scorer, reporter
 from models import Business
+from niche_catalog import get_niche_variants
 from query_planner import build_query_queue
 from search_policy import (
     SearchPolicy,
@@ -146,9 +147,11 @@ async def run_search(
     skipped_good_site = 0               # пропущено: есть Instagram, но хороший сайт
     stop_reason: Optional[StopReason] = None
     seen_business_keys: set[tuple[str, ...]] = set()
+    niche_variants = get_niche_variants(niche)
     query_queue = build_query_queue(
         niche=niche,
         city=city,
+        niche_variants=niche_variants,
     )
 
     def _decide(remaining_queries: int):

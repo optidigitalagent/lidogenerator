@@ -184,7 +184,11 @@ class OrchestratorQueryQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run["result"], "result.xlsx")
         self.assertEqual([call["query_text"] for call in run["collector_calls"]], ["test city"])
         self.assertEqual(run["decisions"][-1][1].stop_reason, StopReason.QUERIES_EXHAUSTED)
-        run["queue_builder"].assert_called_once_with(niche="test", city="city")
+        run["queue_builder"].assert_called_once_with(
+            niche="test",
+            city="city",
+            niche_variants=(),
+        )
 
     async def test_exhausted_first_stream_starts_second_before_downstream(self) -> None:
         run = await self._run(
