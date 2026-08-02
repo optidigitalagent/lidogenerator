@@ -21,6 +21,13 @@ import config
 import db
 from agents import collector, site_checker, social_checker, ai_scorer, reporter
 from models import Business
+from search_policy import (
+    SearchPolicy,
+    SearchProgress,
+    StopReason,
+    decide_next,
+    limit_to_target,
+)
 
 # Callback наружу (в Telegram): принимает готовый текст сообщения (на украинском)
 ReportCallback = Callable[[str], Awaitable[None]]
@@ -73,6 +80,11 @@ async def run_search(
         raise ValueError(f"Задача {task_id} не найдена")
 
     niche, city, target_leads = task["niche"], task["city"], task["count"]
+    # Temporary adapter: the current collector limit counts opened Maps cards.
+    policy = SearchPolicy(
+        target_leads=target_leads,
+        max_candidates=config.MAX_BUSINESSES_PER_SEARCH,
+    )
     interval = progress_interval if progress_interval is not None else config.PROGRESS_INTERVAL
     progress = _Progress(progress_callback, interval, stop_event)
     stop_flag = (lambda: stop_event.is_set()) if stop_event else None
@@ -80,8 +92,22 @@ async def run_search(
     # Накопители по ходу батчевого сбора
     leads: List[Business] = []          # валидные лиды (то, что попадёт в таблицу)
     visited = 0                         # просмотрено бизнесов всего
+    checked_candidates = 0              # уникальные кандидаты с завершённой проверкой сайта
     skipped_no_instagram = 0            # пропущено: нет Instagram
     skipped_good_site = 0               # пропущено: есть Instagram, но хороший сайт
+    stop_reason: Optional[StopReason] = None
+
+    def _decide(remaining_queries: int):
+        return decide_next(
+            SearchProgress(
+                qualified_leads=len(leads),
+                checked_candidates=checked_candidates,
+                # Adapter from the current single Maps stream to a future query queue.
+                remaining_queries=remaining_queries,
+                stop_requested=bool(stop_event and stop_event.is_set()),
+            ),
+            policy,
+        )
 
     def _added_counts():
         added_no_site = sum(1 for b in leads if b.website_status == "no website")
@@ -105,6 +131,9 @@ async def run_search(
 
     try:
         db.update_task_status(task_id, "collecting")
+        decision = _decide(remaining_queries=1)
+        if decision.stop_reason is StopReason.USER_STOPPED:
+            raise SearchStopped()
         await progress.update(
             "main",
             f"🔎 Шукаю {target_leads} якісних лідів: «{niche}» у місті {city}...",
@@ -114,51 +143,71 @@ async def run_search(
         async def on_visit(v: int):
             nonlocal visited
             visited = v
-            if stop_event and stop_event.is_set():
+            decision = _decide(remaining_queries=1)
+            if decision.stop_reason is StopReason.USER_STOPPED:
                 raise SearchStopped()
             await _send_progress()
 
         # --- Сбор батчами + фильтрация до набора target_leads ---
         db.update_task_status(task_id, "checking")
-        target_reached = False
 
         async for batch in collector.collect_stream(
-            niche, city, progress_callback=on_visit, stop_flag=stop_flag
+            niche,
+            city,
+            max_businesses=policy.max_candidates,
+            progress_callback=on_visit,
+            stop_flag=stop_flag,
         ):
-            if stop_event and stop_event.is_set():
+            decision = _decide(remaining_queries=1)
+            if not decision.should_continue:
+                stop_reason = decision.stop_reason
+            if stop_reason is StopReason.USER_STOPPED:
                 raise SearchStopped()
+            if stop_reason is not None:
+                break
 
             # Проверяем сайты у бизнесов батча (быстро, параллельно)
             await site_checker.check_sites(batch)
+            checked_candidates += len(batch)
 
             # Отбираем валидные лиды из батча
             for b in batch:
-                if not b.instagram_url:
+                if b.is_lead:
+                    b.task_id = task_id
+                    leads.append(b)
+                elif not b.instagram_url:
                     skipped_no_instagram += 1
-                    continue
-                if b.website_status == "good website":
+                elif b.website_status == "good website":
                     skipped_good_site += 1
-                    continue
-                # Лид: є Instagram І (сайту немає АБО сайт поганий)
-                b.task_id = task_id
-                leads.append(b)
+
+            decision = _decide(remaining_queries=1)
+            if not decision.should_continue:
+                stop_reason = decision.stop_reason
+            if stop_reason is StopReason.USER_STOPPED:
+                raise SearchStopped()
 
             await _send_progress(force=True)
-
-            if len(leads) >= target_leads:
-                leads = leads[:target_leads]
-                target_reached = True
+            if stop_reason is not None:
                 break
 
         # --- Почему остановились ---
-        if stop_event and stop_event.is_set():
+        remaining_queries = 0 if stop_reason is None else 1
+        decision = _decide(remaining_queries=remaining_queries)
+        stop_reason = decision.stop_reason
+        if stop_reason is StopReason.USER_STOPPED:
             raise SearchStopped()
-        if target_reached:
-            reason = f"досягнуто цільову кількість лідів ({target_leads})"
-        elif visited >= config.MAX_BUSINESSES_PER_SEARCH:
-            reason = f"досягнуто safety-ліміт: переглянуто {visited} бізнесів"
-        else:
-            reason = "результати Google Maps вичерпано"
+
+        reason_by_stop = {
+            StopReason.TARGET_REACHED: f"досягнуто цільову кількість лідів ({target_leads})",
+            StopReason.MAX_CANDIDATES_REACHED: (
+                f"досягнуто safety-ліміт: перевірено {checked_candidates} бізнесів"
+            ),
+            StopReason.QUERIES_EXHAUSTED: "результати Google Maps вичерпано",
+        }
+        reason = reason_by_stop[stop_reason]
+
+        # A batch may cross the target; every downstream consumer gets the same capped list.
+        leads = limit_to_target(leads, policy.target_leads)
 
         # --- Обогащение лидов (Instagram + AI-скоринг) — не влияет на отбор ---
         db.update_task_status(task_id, "scoring")
@@ -214,6 +263,7 @@ async def run_search(
 
     except SearchStopped:
         # Пользователь остановил поиск — сохраняем то, что успели набрать
+        leads = limit_to_target(leads, policy.target_leads)
         if leads:
             db.save_businesses(leads)
             for b in leads:
