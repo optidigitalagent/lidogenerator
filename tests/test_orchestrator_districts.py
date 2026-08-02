@@ -9,7 +9,7 @@ import city_catalog
 import orchestrator
 from city_catalog import CityDefinition, DistrictDefinition
 from models import Business
-from niche_catalog import NicheSearchPlan
+from niche_catalog import NicheSearchPlan, resolve_niche_plan
 
 
 D1 = DistrictDefinition(
@@ -88,6 +88,26 @@ EXPECTED_DISTRICT_QUEUE = [
     "Service D1 City A",
     "Service D3 City A",
     "Fallback 1 City A",
+]
+
+EXPECTED_KYIV_QUEUE = [
+    "стоматология Київ",
+    "стоматологія Київ",
+    "стоматологическая клиника Київ",
+    "стоматологічна клініка Київ",
+    "стоматология Голосіївський район Київ",
+    "стоматология Дарницький район Київ",
+    "стоматология Деснянський район Київ",
+    "стоматология Дніпровський район Київ",
+    "стоматология Оболонський район Київ",
+    "стоматология Печерський район Київ",
+    "стоматология Подільський район Київ",
+    "стоматология Святошинський район Київ",
+    "стоматология Солом’янський район Київ",
+    "стоматология Шевченківський район Київ",
+    "стоматологічний кабінет Київ",
+    "зубная клиника Київ",
+    "зубна клініка Київ",
 ]
 
 _NO_REGISTRY_PATCH = object()
@@ -352,14 +372,83 @@ class OrchestratorDistrictTests(unittest.IsolatedAsyncioTestCase):
             "planner": planner,
         }
 
-    async def test_empty_production_registry_preserves_city_wide_queries(self) -> None:
-        run = await self._run(registry=_NO_REGISTRY_PATCH)
+    async def test_production_kyiv_builds_canonical_seventeen_query_queue(self) -> None:
+        run = await self._run(
+            niche="стоматология",
+            city="Киев",
+            plan=resolve_niche_plan("стоматология"),
+            registry=_NO_REGISTRY_PATCH,
+            checked_limit=1000,
+            opened_limit=1000,
+        )
 
-        self.assertEqual(city_catalog.CITY_DEFINITIONS, ())
+        self.assertEqual(run["queries"], EXPECTED_KYIV_QUEUE)
+        self.assertEqual(len(run["queries"]), 17)
+        self.assertFalse(
+            any(
+                "стоматологія Голосіївський" in query
+                or "зубная клиника Голосіївський" in query
+                for query in run["queries"]
+            )
+        )
+        self.assertTrue(any("Киев" in message for message in run["messages"]))
+        self.assertTrue(
+            all(
+                item["niche"] == "стоматология" and item["city"] == "Киев"
+                for item in run["collector_calls"]
+            )
+        )
+        self.assertEqual(
+            run["allocation_calls"][0],
+            {
+                "remaining_checked_candidates": 1000,
+                "remaining_opened_cards": 1000,
+                "active_queries": 17,
+            },
+        )
+        self.assertEqual(run["collector_calls"][0]["max_businesses"], 59)
+
+    async def test_unknown_production_city_remains_city_wide(self) -> None:
+        run = await self._run(
+            niche="стоматология",
+            city="Unknown City",
+            plan=resolve_niche_plan("стоматология"),
+            registry=_NO_REGISTRY_PATCH,
+            checked_limit=1000,
+            opened_limit=1000,
+        )
+
         self.assertEqual(
             run["queries"],
-            ["Service City A", "Primary 2 City A", "Fallback 1 City A"],
+            [
+                "стоматология Unknown City",
+                "стоматологія Unknown City",
+                "стоматологическая клиника Unknown City",
+                "стоматологічна клініка Unknown City",
+                "стоматологічний кабінет Unknown City",
+                "зубная клиника Unknown City",
+                "зубна клініка Unknown City",
+            ],
         )
+        self.assertEqual(len(run["queries"]), 7)
+        self.assertTrue(
+            all(item["city"] == "Unknown City" for item in run["collector_calls"])
+        )
+        self.assertEqual(run["collector_calls"][0]["max_businesses"], 143)
+
+    async def test_unknown_niche_production_kyiv_runs_one_canonical_query(self) -> None:
+        run = await self._run(
+            niche="IT компания",
+            city="Киев",
+            plan=_unknown_plan("IT компания"),
+            registry=_NO_REGISTRY_PATCH,
+            checked_limit=1000,
+            opened_limit=1000,
+        )
+
+        self.assertEqual(run["queries"], ["IT компания Київ"])
+        self.assertEqual(run["collector_calls"][0]["max_businesses"], 1000)
+        run["district_resolver"].assert_not_called()
 
     async def test_known_city_canonical_includes_enabled_and_excludes_disabled(self) -> None:
         run = await self._run()
@@ -606,12 +695,19 @@ class OrchestratorDistrictTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Primary 2 D1 City A", run["queries"])
         self.assertNotIn("Fallback 1 D1 City A", run["queries"])
 
-    async def test_scoped_registry_patch_restores_empty_production_catalog(self) -> None:
-        self.assertEqual(orchestrator.city_catalog.CITY_DEFINITIONS, ())
+    async def test_scoped_registry_patch_restores_production_kyiv_catalog(self) -> None:
+        production_registry = city_catalog.CITY_DEFINITIONS
+        self.assertIs(
+            orchestrator.city_catalog.CITY_DEFINITIONS,
+            production_registry,
+        )
 
         await self._run()
 
-        self.assertEqual(orchestrator.city_catalog.CITY_DEFINITIONS, ())
+        self.assertIs(
+            orchestrator.city_catalog.CITY_DEFINITIONS,
+            production_registry,
+        )
 
 
 if __name__ == "__main__":

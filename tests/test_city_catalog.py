@@ -392,19 +392,22 @@ class EnabledDistrictTests(unittest.TestCase):
             enabled_districts("City A")  # type: ignore[arg-type]
 
 
-class NoProductionDataTests(unittest.TestCase):
-    def test_production_registry_exists_as_an_empty_tuple(self) -> None:
+class ProductionDataContractTests(unittest.TestCase):
+    def test_production_registry_exists_as_a_single_city_tuple(self) -> None:
         self.assertTrue(hasattr(city_catalog, "CITY_DEFINITIONS"))
         self.assertIs(type(city_catalog.CITY_DEFINITIONS), tuple)
-        self.assertEqual(city_catalog.CITY_DEFINITIONS, ())
+        self.assertEqual(len(city_catalog.CITY_DEFINITIONS), 1)
+        self.assertEqual(city_catalog.CITY_DEFINITIONS[0].key, "kyiv")
 
-    def test_empty_registry_builds_an_empty_index(self) -> None:
-        self.assertEqual(
-            build_city_index(city_catalog.CITY_DEFINITIONS),
-            {},
+    def test_production_registry_builds_a_kyiv_index(self) -> None:
+        index = build_city_index(city_catalog.CITY_DEFINITIONS)
+
+        self.assertIs(
+            index["київ"],
+            city_catalog.CITY_DEFINITIONS[0],
         )
 
-    def test_empty_registry_does_not_resolve_a_synthetic_city(self) -> None:
+    def test_production_registry_does_not_resolve_a_synthetic_city(self) -> None:
         self.assertIsNone(
             resolve_city("City A", city_catalog.CITY_DEFINITIONS),
         )
@@ -434,7 +437,10 @@ class NoProductionDataTests(unittest.TestCase):
             tuple(city.canonical_name for city in local_cities),
             ("City A", "City B"),
         )
-        self.assertEqual(city_catalog.CITY_DEFINITIONS, ())
+        self.assertEqual(
+            tuple(city.canonical_name for city in city_catalog.CITY_DEFINITIONS),
+            ("Київ",),
+        )
         self.assertFalse(hasattr(city_catalog, "CITY_CATALOG"))
 
 

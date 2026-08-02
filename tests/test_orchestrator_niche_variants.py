@@ -106,7 +106,13 @@ class OrchestratorNicheVariantsTests(unittest.IsolatedAsyncioTestCase):
             "build_query_queue",
             queue_builder or orchestrator.build_query_queue,
         )
+        production_registry = orchestrator.city_catalog.CITY_DEFINITIONS
         with (
+            patch.object(
+                orchestrator.city_catalog,
+                "CITY_DEFINITIONS",
+                (),
+            ),
             patch.object(
                 orchestrator.config,
                 "MAX_CHECKED_CANDIDATES_PER_TASK",
@@ -142,6 +148,10 @@ class OrchestratorNicheVariantsTests(unittest.IsolatedAsyncioTestCase):
                 progress_interval=0,
             )
 
+        self.assertIs(
+            orchestrator.city_catalog.CITY_DEFINITIONS,
+            production_registry,
+        )
         return {
             "result": result,
             "collector_queries": collector_queries,

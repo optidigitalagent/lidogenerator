@@ -161,7 +161,121 @@ class CityDefinition:
         _validate_district_integrity(self.districts)
 
 
-CITY_DEFINITIONS: tuple[CityDefinition, ...] = ()
+CITY_DEFINITIONS: tuple[CityDefinition, ...] = (
+    CityDefinition(
+        key="kyiv",
+        canonical_name="Київ",
+        aliases=(
+            "Киев",
+            "Kyiv",
+            "Kiev",
+        ),
+        districts=(
+            DistrictDefinition(
+                key="holosiivskyi",
+                display_name="Голосіївський район",
+                query_text="Голосіївський район",
+                aliases=(
+                    "Голосіївський",
+                    "Голосеевский район",
+                    "Голосеевский",
+                ),
+            ),
+            DistrictDefinition(
+                key="darnytskyi",
+                display_name="Дарницький район",
+                query_text="Дарницький район",
+                aliases=(
+                    "Дарницький",
+                    "Дарницкий район",
+                    "Дарницкий",
+                ),
+            ),
+            DistrictDefinition(
+                key="desnianskyi",
+                display_name="Деснянський район",
+                query_text="Деснянський район",
+                aliases=(
+                    "Деснянський",
+                    "Деснянский район",
+                    "Деснянский",
+                ),
+            ),
+            DistrictDefinition(
+                key="dniprovskyi",
+                display_name="Дніпровський район",
+                query_text="Дніпровський район",
+                aliases=(
+                    "Дніпровський",
+                    "Днепровский район",
+                    "Днепровский",
+                ),
+            ),
+            DistrictDefinition(
+                key="obolonskyi",
+                display_name="Оболонський район",
+                query_text="Оболонський район",
+                aliases=(
+                    "Оболонський",
+                    "Оболонский район",
+                    "Оболонский",
+                ),
+            ),
+            DistrictDefinition(
+                key="pecherskyi",
+                display_name="Печерський район",
+                query_text="Печерський район",
+                aliases=(
+                    "Печерський",
+                    "Печерский район",
+                    "Печерский",
+                ),
+            ),
+            DistrictDefinition(
+                key="podilskyi",
+                display_name="Подільський район",
+                query_text="Подільський район",
+                aliases=(
+                    "Подільський",
+                    "Подольский район",
+                    "Подольский",
+                ),
+            ),
+            DistrictDefinition(
+                key="sviatoshynskyi",
+                display_name="Святошинський район",
+                query_text="Святошинський район",
+                aliases=(
+                    "Святошинський",
+                    "Святошинский район",
+                    "Святошинский",
+                ),
+            ),
+            DistrictDefinition(
+                key="solomianskyi",
+                display_name="Солом’янський район",
+                query_text="Солом’янський район",
+                aliases=(
+                    "Солом’янський",
+                    "Солом'янський район",
+                    "Солом'янський",
+                    "Соломенский район",
+                    "Соломенский",
+                ),
+            ),
+            DistrictDefinition(
+                key="shevchenkivskyi",
+                display_name="Шевченківський район",
+                query_text="Шевченківський район",
+                aliases=(
+                    "Шевченківський",
+                    "Шевченковский район",
+                    "Шевченковский",
+                ),
+            ),
+        ),
+    ),
+)
 
 
 def build_city_index(
