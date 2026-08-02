@@ -15,12 +15,14 @@
 
 import asyncio
 import time
+import urllib.parse
 from typing import Awaitable, Callable, List, Optional
 
 import config
 import db
 from agents import collector, site_checker, social_checker, ai_scorer, reporter
 from models import Business
+from query_planner import build_query_queue
 from search_policy import (
     SearchPolicy,
     SearchProgress,
@@ -31,6 +33,53 @@ from search_policy import (
 
 # Callback наружу (в Telegram): принимает готовый текст сообщения (на украинском)
 ReportCallback = Callable[[str], Awaitable[None]]
+
+
+def _normalized_text(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def _normalized_domain(value: str) -> str:
+    raw = value.strip()
+    if not raw:
+        return ""
+    parsed = urllib.parse.urlsplit(raw if "://" in raw else f"//{raw}")
+    domain = (parsed.hostname or "").casefold().rstrip(".")
+    return domain.removeprefix("www.")
+
+
+def _normalized_instagram(value: str) -> str:
+    raw = value.strip()
+    if not raw:
+        return ""
+    parsed = urllib.parse.urlsplit(raw if "://" in raw else f"//{raw}")
+    domain = (parsed.hostname or "").casefold().removeprefix("www.")
+    if domain == "instagram.com" or domain.endswith(".instagram.com"):
+        username = parsed.path.strip("/").split("/", 1)[0].lstrip("@").casefold()
+        if username:
+            return username
+    return _normalized_text(raw).rstrip("/")
+
+
+def _business_dedupe_key(business: Business) -> tuple[str, ...] | None:
+    """Return a stable in-memory identity for one search task."""
+    phone = "".join(character for character in business.phone if character.isdigit())
+    if phone:
+        return ("phone", phone)
+
+    domain = _normalized_domain(business.website)
+    if domain:
+        return ("website", domain)
+
+    instagram = _normalized_instagram(business.instagram_url)
+    if instagram:
+        return ("instagram", instagram)
+
+    name = _normalized_text(business.name)
+    address = _normalized_text(business.address)
+    if name or address:
+        return ("name_address", name, address)
+    return None
 
 
 class SearchStopped(Exception):
@@ -96,6 +145,11 @@ async def run_search(
     skipped_no_instagram = 0            # пропущено: нет Instagram
     skipped_good_site = 0               # пропущено: есть Instagram, но хороший сайт
     stop_reason: Optional[StopReason] = None
+    seen_business_keys: set[tuple[str, ...]] = set()
+    query_queue = build_query_queue(
+        niche=niche,
+        city=city,
+    )
 
     def _decide(remaining_queries: int):
         return decide_next(
@@ -131,7 +185,7 @@ async def run_search(
 
     try:
         db.update_task_status(task_id, "collecting")
-        decision = _decide(remaining_queries=1)
+        decision = _decide(remaining_queries=query_queue.remaining_queries)
         if decision.stop_reason is StopReason.USER_STOPPED:
             raise SearchStopped()
         await progress.update(
@@ -140,25 +194,11 @@ async def run_search(
             force=True,
         )
 
-        async def on_visit(v: int):
-            nonlocal visited
-            visited = v
-            decision = _decide(remaining_queries=1)
-            if decision.stop_reason is StopReason.USER_STOPPED:
-                raise SearchStopped()
-            await _send_progress()
-
         # --- Сбор батчами + фильтрация до набора target_leads ---
         db.update_task_status(task_id, "checking")
 
-        async for batch in collector.collect_stream(
-            niche,
-            city,
-            max_businesses=policy.max_candidates,
-            progress_callback=on_visit,
-            stop_flag=stop_flag,
-        ):
-            decision = _decide(remaining_queries=1)
+        while not query_queue.exhausted:
+            decision = _decide(remaining_queries=query_queue.remaining_queries)
             if not decision.should_continue:
                 stop_reason = decision.stop_reason
             if stop_reason is StopReason.USER_STOPPED:
@@ -166,36 +206,89 @@ async def run_search(
             if stop_reason is not None:
                 break
 
-            # Проверяем сайты у бизнесов батча (быстро, параллельно)
-            await site_checker.check_sites(batch)
-            checked_candidates += len(batch)
+            search_query, query_queue = query_queue.take_next()
+            assert search_query is not None
+            active_remaining_queries = query_queue.remaining_queries + 1
+            visited_before_stream = visited
 
-            # Отбираем валидные лиды из батча
-            for b in batch:
-                if b.is_lead:
-                    b.task_id = task_id
-                    leads.append(b)
-                elif not b.instagram_url:
-                    skipped_no_instagram += 1
-                elif b.website_status == "good website":
-                    skipped_good_site += 1
+            async def on_visit(v: int):
+                nonlocal visited
+                visited = visited_before_stream + v
+                decision = _decide(remaining_queries=active_remaining_queries)
+                if decision.stop_reason is StopReason.USER_STOPPED:
+                    raise SearchStopped()
+                await _send_progress()
 
-            decision = _decide(remaining_queries=1)
-            if not decision.should_continue:
-                stop_reason = decision.stop_reason
-            if stop_reason is StopReason.USER_STOPPED:
-                raise SearchStopped()
+            stream_exhausted = False
+            async for batch in collector.collect_stream(
+                niche,
+                city,
+                max_businesses=policy.max_candidates - checked_candidates,
+                progress_callback=on_visit,
+                stop_flag=stop_flag,
+                query_text=search_query.text,
+            ):
+                decision = _decide(remaining_queries=active_remaining_queries)
+                if not decision.should_continue:
+                    stop_reason = decision.stop_reason
+                if stop_reason is StopReason.USER_STOPPED:
+                    raise SearchStopped()
+                if stop_reason is not None:
+                    break
 
-            await _send_progress(force=True)
+                unique_batch: List[Business] = []
+                for business in batch:
+                    key = _business_dedupe_key(business)
+                    if key is not None and key in seen_business_keys:
+                        continue
+                    if key is not None:
+                        seen_business_keys.add(key)
+                    unique_batch.append(business)
+
+                if unique_batch:
+                    # Проверяем сайты у уникальных бизнесов батча (быстро, параллельно)
+                    await site_checker.check_sites(unique_batch)
+                    checked_candidates += len(unique_batch)
+
+                    # Отбираем валидные лиды из батча
+                    for b in unique_batch:
+                        if b.is_lead:
+                            b.task_id = task_id
+                            leads.append(b)
+                        elif not b.instagram_url:
+                            skipped_no_instagram += 1
+                        elif b.website_status == "good website":
+                            skipped_good_site += 1
+
+                decision = _decide(remaining_queries=active_remaining_queries)
+                if not decision.should_continue:
+                    stop_reason = decision.stop_reason
+                if stop_reason is StopReason.USER_STOPPED:
+                    raise SearchStopped()
+
+                await _send_progress(force=True)
+                if stop_reason is not None:
+                    break
+            else:
+                stream_exhausted = True
+
             if stop_reason is not None:
                 break
+            if stream_exhausted:
+                decision = _decide(remaining_queries=query_queue.remaining_queries)
+                if not decision.should_continue:
+                    stop_reason = decision.stop_reason
+                if stop_reason is StopReason.USER_STOPPED:
+                    raise SearchStopped()
+                if stop_reason is not None:
+                    break
 
         # --- Почему остановились ---
-        remaining_queries = 0 if stop_reason is None else 1
-        decision = _decide(remaining_queries=remaining_queries)
-        stop_reason = decision.stop_reason
-        if stop_reason is StopReason.USER_STOPPED:
-            raise SearchStopped()
+        if stop_reason is None:
+            decision = _decide(remaining_queries=query_queue.remaining_queries)
+            stop_reason = decision.stop_reason
+            if stop_reason is StopReason.USER_STOPPED:
+                raise SearchStopped()
 
         reason_by_stop = {
             StopReason.TARGET_REACHED: f"досягнуто цільову кількість лідів ({target_leads})",

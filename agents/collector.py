@@ -144,6 +144,13 @@ def _dedup_key(b: Business) -> tuple:
 StreamProgressCallback = Callable[[int], Awaitable[None]]
 
 
+def _maps_search_url(niche: str, city: str, query_text: str | None = None) -> str:
+    """Build the Maps URL, preserving the legacy niche/city query by default."""
+    search_text = f"{niche} {city}" if query_text is None else query_text
+    query = urllib.parse.quote(search_text)
+    return f"https://www.google.com/maps/search/{query}?hl=uk"
+
+
 async def collect_stream(
     niche: str,
     city: str,
@@ -152,6 +159,7 @@ async def collect_stream(
     max_scroll_rounds: Optional[int] = None,
     progress_callback: Optional[StreamProgressCallback] = None,
     stop_flag: Optional[Callable[[], bool]] = None,
+    query_text: str | None = None,
 ) -> AsyncIterator[List[Business]]:
     """Асинхронный генератор: отдаёт бизнесы из Google Maps батчами.
 
@@ -175,8 +183,7 @@ async def collect_stream(
     max_businesses = max_businesses or config.MAX_BUSINESSES_PER_SEARCH
     max_scroll_rounds = max_scroll_rounds or config.MAX_SCROLL_ROUNDS
 
-    query = urllib.parse.quote(f"{niche} {city}")
-    url = f"https://www.google.com/maps/search/{query}?hl=uk"
+    url = _maps_search_url(niche, city, query_text)
 
     visited_links: set = set()  # ссылки карточек, которые уже открывали
     seen_keys: set = set()      # ключи дедупа (название+адрес+IG)
