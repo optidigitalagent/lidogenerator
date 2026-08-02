@@ -33,7 +33,12 @@ COLLECT_DELAY_MAX = 6           # задержка между карточкам
 # собрали батч -> проверили сайты -> отфильтровали -> добавили лиды -> повторяем,
 # пока не наберём target_leads или не упрёмся в safety-лимиты ниже.
 COLLECT_BATCH_SIZE = 15          # сколько бизнесов собирать за один батч перед фильтрацией
-MAX_BUSINESSES_PER_SEARCH = 1000 # safety: не просматривать больше 1000 бизнесов за один поиск
+# Legacy per-stream/default limit for standalone collector.collect_stream() calls.
+MAX_BUSINESSES_PER_SEARCH = 1000
+# Task-global limit for unique candidates that complete the site checker.
+MAX_CHECKED_CANDIDATES_PER_TASK = 1000
+# Task-global limit for Maps cards actually opened across all query streams.
+MAX_MAPS_CARDS_PER_TASK = 1000
 MAX_SCROLL_ROUNDS = 20           # safety: не больше 20 scroll-итераций списка Google Maps
 COLLECT_STALE_ROUNDS = 3         # столько scroll-итераций подряд без новых карточек = конец списка
 INSTAGRAM_DELAY_MIN = 5         # задержка между профилями Instagram, сек (от)

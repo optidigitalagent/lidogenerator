@@ -73,6 +73,66 @@ class SearchPolicyDecisionTests(unittest.TestCase):
             StopReason.TARGET_REACHED,
         )
 
+    def test_discovery_card_limit_reached_at_or_above_limit(self) -> None:
+        policy = SearchPolicy(100, 500, max_discovery_cards=300)
+        for visited_cards in (300, 301):
+            with self.subTest(visited_cards=visited_cards):
+                progress = SearchProgress(38, 120, 4, visited_cards=visited_cards)
+                self.assertEqual(
+                    decide_next(progress, policy).stop_reason,
+                    StopReason.MAX_DISCOVERY_CARDS_REACHED,
+                )
+
+    def test_user_stop_has_priority_over_discovery_card_limit(self) -> None:
+        policy = SearchPolicy(100, 500, max_discovery_cards=300)
+        progress = SearchProgress(
+            qualified_leads=100,
+            checked_candidates=500,
+            remaining_queries=0,
+            stop_requested=True,
+            visited_cards=300,
+        )
+
+        self.assertEqual(
+            decide_next(progress, policy).stop_reason,
+            StopReason.USER_STOPPED,
+        )
+
+    def test_target_has_priority_over_discovery_card_limit(self) -> None:
+        policy = SearchPolicy(100, 500, max_discovery_cards=300)
+        progress = SearchProgress(100, 120, 4, visited_cards=300)
+
+        self.assertEqual(
+            decide_next(progress, policy).stop_reason,
+            StopReason.TARGET_REACHED,
+        )
+
+    def test_candidate_limit_has_priority_over_discovery_card_limit(self) -> None:
+        policy = SearchPolicy(100, 500, max_discovery_cards=300)
+        progress = SearchProgress(38, 500, 4, visited_cards=300)
+
+        self.assertEqual(
+            decide_next(progress, policy).stop_reason,
+            StopReason.MAX_CANDIDATES_REACHED,
+        )
+
+    def test_discovery_card_limit_has_priority_over_query_exhaustion(self) -> None:
+        policy = SearchPolicy(100, 500, max_discovery_cards=300)
+        progress = SearchProgress(38, 120, 0, visited_cards=300)
+
+        self.assertEqual(
+            decide_next(progress, policy).stop_reason,
+            StopReason.MAX_DISCOVERY_CARDS_REACHED,
+        )
+
+    def test_none_discovery_card_limit_preserves_legacy_behavior(self) -> None:
+        progress = SearchProgress(38, 120, 0, visited_cards=10_000)
+
+        self.assertEqual(
+            decide_next(progress, self.policy).stop_reason,
+            StopReason.QUERIES_EXHAUSTED,
+        )
+
 
 class ValidationTests(unittest.TestCase):
     def test_policy_rejects_invalid_integer_values(self) -> None:
@@ -88,6 +148,18 @@ class ValidationTests(unittest.TestCase):
     def test_policy_rejects_candidate_limit_below_target(self) -> None:
         with self.assertRaisesRegex(ValueError, "max_candidates"):
             SearchPolicy(target_leads=100, max_candidates=99)
+
+    def test_policy_rejects_invalid_discovery_card_limit(self) -> None:
+        for value in (0, -1, 1.5, "1", True, False):
+            with self.subTest(value=value):
+                with self.assertRaises((TypeError, ValueError)):
+                    SearchPolicy(
+                        target_leads=1,
+                        max_candidates=1,
+                        max_discovery_cards=value,  # type: ignore[arg-type]
+                    )
+
+        self.assertIsNone(SearchPolicy(1, 1).max_discovery_cards)
 
     def test_progress_rejects_invalid_counters(self) -> None:
         invalid_values = (-1, 1.5, "1", None, True, False)
@@ -109,6 +181,18 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(TypeError, "stop_requested"):
                     SearchProgress(0, 0, 0, stop_requested=value)  # type: ignore[arg-type]
+
+    def test_progress_rejects_invalid_visited_cards(self) -> None:
+        for value in (-1, 1.5, "1", None, True, False):
+            with self.subTest(value=value):
+                with self.assertRaises((TypeError, ValueError)):
+                    SearchProgress(0, 0, 0, visited_cards=value)  # type: ignore[arg-type]
+
+    def test_legacy_progress_construction_defaults_visited_cards(self) -> None:
+        progress = SearchProgress(1, 2, 3, True)
+
+        self.assertTrue(progress.stop_requested)
+        self.assertEqual(progress.visited_cards, 0)
 
     def test_decision_rejects_invalid_combinations(self) -> None:
         with self.assertRaisesRegex(ValueError, "cannot have a stop reason"):

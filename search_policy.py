@@ -14,6 +14,7 @@ class StopReason(str, Enum):
     TARGET_REACHED = "target_reached"
     USER_STOPPED = "user_stopped"
     MAX_CANDIDATES_REACHED = "max_candidates_reached"
+    MAX_DISCOVERY_CARDS_REACHED = "max_discovery_cards_reached"
     QUERIES_EXHAUSTED = "queries_exhausted"
 
 
@@ -37,10 +38,16 @@ class SearchPolicy:
 
     target_leads: int
     max_candidates: int
+    max_discovery_cards: int | None = None
 
     def __post_init__(self) -> None:
         _validate_positive_integer(self.target_leads, "target_leads")
         _validate_positive_integer(self.max_candidates, "max_candidates")
+        if self.max_discovery_cards is not None:
+            _validate_positive_integer(
+                self.max_discovery_cards,
+                "max_discovery_cards",
+            )
         if self.max_candidates < self.target_leads:
             raise ValueError("max_candidates must be greater than or equal to target_leads")
 
@@ -53,6 +60,7 @@ class SearchProgress:
     checked_candidates: int
     remaining_queries: int
     stop_requested: bool = False
+    visited_cards: int = 0
 
     def __post_init__(self) -> None:
         _validate_non_negative_integer(self.qualified_leads, "qualified_leads")
@@ -63,6 +71,7 @@ class SearchProgress:
                 "stop_requested must be a boolean, "
                 f"not {type(self.stop_requested).__name__}"
             )
+        _validate_non_negative_integer(self.visited_cards, "visited_cards")
 
 
 @dataclass(frozen=True)
@@ -112,6 +121,11 @@ def decide_next(progress: SearchProgress, policy: SearchPolicy) -> SearchDecisio
         return SearchDecision.stop(StopReason.TARGET_REACHED)
     if progress.checked_candidates >= policy.max_candidates:
         return SearchDecision.stop(StopReason.MAX_CANDIDATES_REACHED)
+    if (
+        policy.max_discovery_cards is not None
+        and progress.visited_cards >= policy.max_discovery_cards
+    ):
+        return SearchDecision.stop(StopReason.MAX_DISCOVERY_CARDS_REACHED)
     if progress.remaining_queries == 0:
         return SearchDecision.stop(StopReason.QUERIES_EXHAUSTED)
     return SearchDecision.continue_search()
