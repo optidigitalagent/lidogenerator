@@ -154,14 +154,19 @@ def build_query_queue(
     *,
     niche_variants: Sequence[str] = (),
     districts: Sequence[str] = (),
+    fallback_variants: Sequence[str] = (),
     max_queries: int | None = None,
 ) -> QueryQueue:
-    """Build an ordered, deduplicated queue of search queries."""
+    """Build a deduplicated base, primary, district, then fallback queue."""
 
     normalized_niche = _normalize_non_empty_string(niche, "niche")
     normalized_city = _normalize_non_empty_string(city, "city")
     normalized_variants = _normalize_string_sequence(niche_variants, "niche_variants")
     normalized_districts = _normalize_string_sequence(districts, "districts")
+    normalized_fallbacks = _normalize_string_sequence(
+        fallback_variants,
+        "fallback_variants",
+    )
 
     if max_queries is not None:
         if type(max_queries) is not int:
@@ -211,18 +216,16 @@ def build_query_queue(
             )
         )
 
-    for variant in normalized_variants:
-        for district in normalized_districts:
-            append_unique(
-                SearchQuery(
-                    text=f"{variant} {district} {normalized_city}",
-                    niche=normalized_niche,
-                    city=normalized_city,
-                    kind=QueryKind.DISTRICT_VARIANT,
-                    variant=variant,
-                    district=district,
-                )
+    for variant in normalized_fallbacks:
+        append_unique(
+            SearchQuery(
+                text=f"{variant} {normalized_city}",
+                niche=normalized_niche,
+                city=normalized_city,
+                kind=QueryKind.NICHE_VARIANT,
+                variant=variant,
             )
+        )
 
     if max_queries is not None:
         planned = planned[:max_queries]
