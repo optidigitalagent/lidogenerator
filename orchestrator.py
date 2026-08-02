@@ -23,6 +23,7 @@ import db
 from agents import collector, site_checker, social_checker, ai_scorer, reporter
 from models import Business
 from niche_catalog import resolve_niche_plan
+from query_budget import allocate_query_budget
 from query_planner import build_query_queue
 from search_policy import (
     SearchPolicy,
@@ -130,10 +131,10 @@ async def run_search(
         raise ValueError(f"Задача {task_id} не найдена")
 
     niche, city, target_leads = task["niche"], task["city"], task["count"]
-    # Temporary adapter: the current collector limit counts opened Maps cards.
     policy = SearchPolicy(
         target_leads=target_leads,
-        max_candidates=config.MAX_BUSINESSES_PER_SEARCH,
+        max_candidates=config.MAX_CHECKED_CANDIDATES_PER_TASK,
+        max_discovery_cards=config.MAX_MAPS_CARDS_PER_TASK,
     )
     interval = progress_interval if progress_interval is not None else config.PROGRESS_INTERVAL
     progress = _Progress(progress_callback, interval, stop_event)
@@ -163,9 +164,9 @@ async def run_search(
             SearchProgress(
                 qualified_leads=len(leads),
                 checked_candidates=checked_candidates,
-                # Adapter from the current single Maps stream to a future query queue.
                 remaining_queries=remaining_queries,
                 stop_requested=bool(stop_event and stop_event.is_set()),
+                visited_cards=visited,
             ),
             policy,
         )
@@ -182,6 +183,8 @@ async def run_search(
             f"🔎 Шукаю {target_leads} якісних лідів: «{niche}» у місті {city}\n"
             f"Запрошено лідів: {target_leads}\n"
             f"Переглянуто бізнесів: {visited}\n"
+            f"Відкрито карток Google Maps: {visited}/{policy.max_discovery_cards}\n"
+            f"Перевірено унікальних кандидатів: {checked_candidates}/{policy.max_candidates}\n"
             f"Знайдено валідних лідів: {len(leads)}/{target_leads}\n"
             f"Пропущено без Instagram: {skipped_no_instagram}\n"
             f"Пропущено з гарним сайтом: {skipped_good_site}\n"
@@ -216,6 +219,28 @@ async def run_search(
             search_query, query_queue = query_queue.take_next()
             assert search_query is not None
             active_remaining_queries = query_queue.remaining_queries + 1
+            assert policy.max_discovery_cards is not None
+            query_budget = allocate_query_budget(
+                remaining_checked_candidates=(
+                    policy.max_candidates - checked_candidates
+                ),
+                remaining_opened_cards=(
+                    policy.max_discovery_cards - visited
+                ),
+                active_queries=active_remaining_queries,
+            )
+            if query_budget.exhausted:
+                decision = _decide(
+                    remaining_queries=active_remaining_queries,
+                )
+                stop_reason = decision.stop_reason
+                if stop_reason is StopReason.USER_STOPPED:
+                    raise SearchStopped()
+                if stop_reason is None:
+                    raise RuntimeError(
+                        "exhausted query budget without a policy stop reason"
+                    )
+                break
             visited_before_stream = visited
 
             async def on_visit(v: int):
@@ -230,18 +255,14 @@ async def run_search(
             async for batch in collector.collect_stream(
                 niche,
                 city,
-                max_businesses=policy.max_candidates - checked_candidates,
+                max_businesses=query_budget.current_query_card_limit,
                 progress_callback=on_visit,
                 stop_flag=stop_flag,
                 query_text=search_query.text,
             ):
                 decision = _decide(remaining_queries=active_remaining_queries)
-                if not decision.should_continue:
-                    stop_reason = decision.stop_reason
-                if stop_reason is StopReason.USER_STOPPED:
+                if decision.stop_reason is StopReason.USER_STOPPED:
                     raise SearchStopped()
-                if stop_reason is not None:
-                    break
 
                 unique_batch: List[Business] = []
                 for business in batch:
@@ -300,7 +321,12 @@ async def run_search(
         reason_by_stop = {
             StopReason.TARGET_REACHED: f"досягнуто цільову кількість лідів ({target_leads})",
             StopReason.MAX_CANDIDATES_REACHED: (
-                f"досягнуто safety-ліміт: перевірено {checked_candidates} бізнесів"
+                "досягнуто safety-ліміт унікальних перевірених кандидатів "
+                f"({checked_candidates}/{policy.max_candidates})"
+            ),
+            StopReason.MAX_DISCOVERY_CARDS_REACHED: (
+                "досягнуто safety-ліміт відкритих карток Google Maps "
+                f"({visited}/{policy.max_discovery_cards})"
             ),
             StopReason.QUERIES_EXHAUSTED: "результати Google Maps вичерпано",
         }
@@ -348,6 +374,8 @@ async def run_search(
             f"✅ Готово!\n"
             f"Запрошено лідів: {target_leads}\n"
             f"Переглянуто бізнесів: {visited}\n"
+            f"Відкрито карток Google Maps: {visited}/{policy.max_discovery_cards}\n"
+            f"Перевірено унікальних кандидатів: {checked_candidates}/{policy.max_candidates}\n"
             f"Пропущено без Instagram: {skipped_no_instagram}\n"
             f"Пропущено з гарним сайтом: {skipped_good_site}\n"
             f"Додано без сайту: {added_no_site}\n"

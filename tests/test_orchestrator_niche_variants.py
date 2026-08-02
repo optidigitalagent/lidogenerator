@@ -107,7 +107,16 @@ class OrchestratorNicheVariantsTests(unittest.IsolatedAsyncioTestCase):
             queue_builder or orchestrator.build_query_queue,
         )
         with (
-            patch.object(orchestrator.config, "MAX_BUSINESSES_PER_SEARCH", 100),
+            patch.object(
+                orchestrator.config,
+                "MAX_CHECKED_CANDIDATES_PER_TASK",
+                100,
+            ),
+            patch.object(
+                orchestrator.config,
+                "MAX_MAPS_CARDS_PER_TASK",
+                100,
+            ),
             patch.object(orchestrator.db, "get_task", return_value=task),
             patch.object(orchestrator.db, "update_task_status", statuses),
             patch.object(orchestrator.db, "save_businesses", side_effect=capture("save")),

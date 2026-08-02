@@ -139,7 +139,16 @@ class OrchestratorQueryQueueTests(unittest.IsolatedAsyncioTestCase):
 
         task = {"niche": "test", "city": "city", "count": target}
         with (
-            patch.object(orchestrator.config, "MAX_BUSINESSES_PER_SEARCH", max_candidates),
+            patch.object(
+                orchestrator.config,
+                "MAX_CHECKED_CANDIDATES_PER_TASK",
+                max_candidates,
+            ),
+            patch.object(
+                orchestrator.config,
+                "MAX_MAPS_CARDS_PER_TASK",
+                max_candidates,
+            ),
             patch.object(orchestrator.db, "get_task", return_value=task),
             patch.object(orchestrator.db, "update_task_status", statuses),
             patch.object(orchestrator.db, "save_businesses", side_effect=capture("save")),

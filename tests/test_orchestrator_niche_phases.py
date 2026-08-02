@@ -131,7 +131,12 @@ class OrchestratorNichePhasesTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(
                 orchestrator.config,
-                "MAX_BUSINESSES_PER_SEARCH",
+                "MAX_CHECKED_CANDIDATES_PER_TASK",
+                max_candidates,
+            ),
+            patch.object(
+                orchestrator.config,
+                "MAX_MAPS_CARDS_PER_TASK",
                 max_candidates,
             ),
             patch.object(orchestrator.db, "get_task", return_value=task),
