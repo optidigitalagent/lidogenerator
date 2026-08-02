@@ -161,6 +161,9 @@ class CityDefinition:
         _validate_district_integrity(self.districts)
 
 
+CITY_DEFINITIONS: tuple[CityDefinition, ...] = ()
+
+
 def build_city_index(
     cities: tuple[CityDefinition, ...],
 ) -> dict[str, CityDefinition]:

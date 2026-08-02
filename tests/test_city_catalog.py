@@ -393,10 +393,49 @@ class EnabledDistrictTests(unittest.TestCase):
 
 
 class NoProductionDataTests(unittest.TestCase):
-    def test_module_does_not_export_a_ready_non_empty_catalog(self) -> None:
-        for name in ("CITY_DEFINITIONS", "CITY_CATALOG"):
-            with self.subTest(name=name):
-                self.assertFalse(hasattr(city_catalog, name))
+    def test_production_registry_exists_as_an_empty_tuple(self) -> None:
+        self.assertTrue(hasattr(city_catalog, "CITY_DEFINITIONS"))
+        self.assertIs(type(city_catalog.CITY_DEFINITIONS), tuple)
+        self.assertEqual(city_catalog.CITY_DEFINITIONS, ())
+
+    def test_empty_registry_builds_an_empty_index(self) -> None:
+        self.assertEqual(
+            build_city_index(city_catalog.CITY_DEFINITIONS),
+            {},
+        )
+
+    def test_empty_registry_does_not_resolve_a_synthetic_city(self) -> None:
+        self.assertIsNone(
+            resolve_city("City A", city_catalog.CITY_DEFINITIONS),
+        )
+
+    def test_production_registry_does_not_support_append(self) -> None:
+        with self.assertRaises(AttributeError):
+            city_catalog.CITY_DEFINITIONS.append(_city())  # type: ignore[attr-defined]
+
+    def test_production_registry_contains_no_synthetic_cities(self) -> None:
+        canonical_names = {
+            city.canonical_name for city in city_catalog.CITY_DEFINITIONS
+        }
+        self.assertNotIn("City A", canonical_names)
+        self.assertNotIn("City B", canonical_names)
+
+    def test_synthetic_city_fixtures_remain_local_to_tests(self) -> None:
+        local_cities = (
+            _city(),
+            _city(
+                key="city_b",
+                canonical_name="City B",
+                aliases=(),
+            ),
+        )
+
+        self.assertEqual(
+            tuple(city.canonical_name for city in local_cities),
+            ("City A", "City B"),
+        )
+        self.assertEqual(city_catalog.CITY_DEFINITIONS, ())
+        self.assertFalse(hasattr(city_catalog, "CITY_CATALOG"))
 
 
 if __name__ == "__main__":
