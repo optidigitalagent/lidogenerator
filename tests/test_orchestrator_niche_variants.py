@@ -211,7 +211,7 @@ class OrchestratorNicheVariantsTests(unittest.IsolatedAsyncioTestCase):
         plan_resolver.assert_called_once_with("custom")
         self.assertEqual(run["collector_queries"], ["custom Киев", "variant Киев"])
 
-    async def test_queue_builder_receives_variants_without_districts_or_limit(self) -> None:
+    async def test_queue_builder_receives_phased_variants_without_districts_or_limit(self) -> None:
         real_builder = orchestrator.build_query_queue
         builder = Mock(wraps=real_builder)
         await self._run(
@@ -224,9 +224,13 @@ class OrchestratorNicheVariantsTests(unittest.IsolatedAsyncioTestCase):
         builder.assert_called_once()
         self.assertEqual(
             builder.call_args.kwargs["niche_variants"],
-            tuple(query.rsplit(" ", 1)[0] for query in DENTISTRY_QUERIES[1:]),
+            tuple(query.rsplit(" ", 1)[0] for query in DENTISTRY_QUERIES[1:4]),
         )
-        self.assertNotIn("districts", builder.call_args.kwargs)
+        self.assertEqual(builder.call_args.kwargs["districts"], ())
+        self.assertEqual(
+            builder.call_args.kwargs["fallback_variants"],
+            tuple(query.rsplit(" ", 1)[0] for query in DENTISTRY_QUERIES[4:]),
+        )
         self.assertNotIn("max_queries", builder.call_args.kwargs)
 
     async def test_duplicate_business_across_queries_is_processed_once(self) -> None:

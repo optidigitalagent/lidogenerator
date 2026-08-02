@@ -197,6 +197,8 @@ class OrchestratorQueryQueueTests(unittest.IsolatedAsyncioTestCase):
             niche="test",
             city="city",
             niche_variants=(),
+            districts=(),
+            fallback_variants=(),
         )
 
     async def test_exhausted_first_stream_starts_second_before_downstream(self) -> None:

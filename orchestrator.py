@@ -18,6 +18,7 @@ import time
 import urllib.parse
 from typing import Awaitable, Callable, List, Optional
 
+import city_catalog
 import config
 import db
 from agents import collector, site_checker, social_checker, ai_scorer, reporter
@@ -149,14 +150,29 @@ async def run_search(
     stop_reason: Optional[StopReason] = None
     seen_business_keys: set[tuple[str, ...]] = set()
     niche_plan = resolve_niche_plan(niche)
-    ordered_variants = (
-        *niche_plan.primary_variants,
-        *niche_plan.fallback_variants,
+    city_definition = city_catalog.resolve_city(
+        city,
+        city_catalog.CITY_DEFINITIONS,
+    )
+    query_city = (
+        city_definition.canonical_name
+        if city_definition is not None
+        else city
+    )
+    district_fragments = (
+        tuple(
+            district.query_text
+            for district in city_catalog.enabled_districts(city_definition)
+        )
+        if niche_plan.known and city_definition is not None
+        else ()
     )
     query_queue = build_query_queue(
         niche=niche_plan.base_niche,
-        city=city,
-        niche_variants=ordered_variants,
+        city=query_city,
+        niche_variants=niche_plan.primary_variants,
+        districts=district_fragments,
+        fallback_variants=niche_plan.fallback_variants,
     )
 
     def _decide(remaining_queries: int):
