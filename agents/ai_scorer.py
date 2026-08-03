@@ -1,16 +1,13 @@
 # -*- coding: utf-8 -*-
-"""AI Scorer — оценка лидов через Claude API (claude-haiku-4-5).
+"""Lead scoring through the OpenAI Responses API.
 
-Для каждого бизнеса собираем краткую сводку (сайт, Instagram, отзывы)
-и просим Claude вернуть JSON: {"score": 0-100, "priority": "hot/warm/cold", "reason": "..."}.
-
-Если ANTHROPIC_API_KEY не задан — скоринг пропускается, всем ставится score=50 (warm).
-Если запрос к API упал — этому бизнесу тоже ставится score=50, цикл не прерывается.
+The scorer uses ``gpt-5-nano`` by default and requests strict structured JSON.
+Paid scoring is disabled by default. When it is disabled or unavailable, each
+business receives a neutral ``score=50`` / ``priority=warm`` fallback so the
+lead pipeline can continue.
 """
 
-import asyncio
 import json
-import re
 from typing import Awaitable, Callable, List, Optional
 
 import config
@@ -18,51 +15,60 @@ from models import Business
 
 ProgressCallback = Callable[[int, int], Awaitable[None]]
 
-# Промпт из техплана — вшит в код, руками больше не пишется
-SCORING_PROMPT = """Ты — помощник менеджера веб-студии в Украине. Оцени бизнес как лид.
+FALLBACK_SCORE = 50
+FALLBACK_PRIORITY = "warm"
+INVALID_RESPONSE_REASON = "AI вернул некорректный ответ"
 
-Данные бизнеса:
-- Название: {name}
-- Ниша: {niche}
-- Город: {city}
-- Сайт: {site_status}
-- Instagram: {instagram_status}
-- Подписчики: {followers}
-- Последний пост: {last_post_days} дней назад
-- Отзывов на Maps: {reviews_count}
+SCORING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "priority": {"type": "string", "enum": ["hot", "warm", "cold"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["score", "priority", "reason"],
+    "additionalProperties": False,
+}
 
-Оцени по шкале 0-100. Критерии:
-  Нет сайта: +35 баллов
-  Сайт старый/некачественный: +20 баллов
-  Instagram активный (<30 дней): +20 баллов
-  Много подписчиков (>500): +10 баллов
-  Много отзывов на Maps (>20): +10 баллов
-  Ниша с высоким чеком (клиника, ресторан, салон): +5 баллов
+SCORING_TEXT_FORMAT = {
+    "format": {
+        "type": "json_schema",
+        "name": "lead_score",
+        "strict": True,
+        "schema": SCORING_SCHEMA,
+    }
+}
 
-Верни ТОЛЬКО JSON: {{"score": 75, "priority": "hot", "reason": "..."}}
-priority: hot (>=70) / warm (40-69) / cold (<40)"""
+SCORING_INSTRUCTIONS = """You rank already-qualified leads for a Ukrainian web studio.
+Return a score from 0 to 100, a matching priority, and a concise reason.
+Priority boundaries are: hot >= 70, warm 40-69, cold < 40.
+Do not change lead qualification; only rank the supplied lead.
+
+Scoring signals:
+- no confirmed website: +35
+- old or poor website: +20
+- active Instagram (last post under 30 days): +20
+- more than 500 followers: +10
+- more than 20 Maps reviews: +10
+- high-ticket niche such as a clinic, restaurant, or salon: +5
+
+Website resolution or audit uncertainty is not evidence that a website is absent.
+Do not award no-website points when the website status is uncertain.
+"""
 
 
-def _site_status(b: Business) -> str:
-    """Поле site_quality -> человекочитаемый статус для промпта."""
-    if not b.has_site:
-        return "нет" if b.site_quality == "none" else "нет (указан, но не открывается)"
-    return {
-        "old": "старый",
-        "bad": "плохой",
-        "good": "хороший",
-    }.get(b.site_quality, "есть, качество неизвестно")
-
-
-def _instagram_status(b: Business) -> str:
-    """Статус Instagram для промпта."""
-    if not b.instagram_url:
-        return "нет"
-    return "активный" if b.instagram_active else "мёртвый"
+def _site_status(business: Business) -> str:
+    """Return an uncertainty-safe website status for the scoring prompt."""
+    status = business.website_status
+    if status == "uncertain website":
+        return "uncertain website (do not assume that no website exists)"
+    if status == "no website" and business.site_quality == "dead":
+        return "no working website (the supplied site is confirmed dead)"
+    return status
 
 
 def _priority_from_score(score: int) -> str:
-    """Подстраховка: считаем priority из score по шкале техплана."""
+    """Derive the only accepted priority from the numeric score."""
     if score >= 70:
         return "hot"
     if score >= 40:
@@ -70,93 +76,153 @@ def _priority_from_score(score: int) -> str:
     return "cold"
 
 
-def _fallback(b: Business, reason: str) -> None:
-    """Поставить нейтральную оценку, когда AI недоступен."""
-    b.ai_score = 50
-    b.ai_priority = "warm"
-    b.ai_reason = reason
+def _fallback(business: Business, reason: str) -> None:
+    """Apply the pipeline's neutral, fail-open result."""
+    business.ai_score = FALLBACK_SCORE
+    business.ai_priority = FALLBACK_PRIORITY
+    business.ai_reason = reason
 
 
-def _parse_response(text: str) -> Optional[dict]:
-    """Достать JSON из ответа модели (на случай лишнего текста вокруг)."""
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except json.JSONDecodeError:
-                return None
-    return None
-
-
-async def _score_one(client, b: Business) -> None:
-    """Оценить один бизнес. Результат пишется прямо в объект."""
-    prompt = SCORING_PROMPT.format(
-        name=b.name,
-        niche=b.niche,
-        city=b.city,
-        site_status=_site_status(b),
-        instagram_status=_instagram_status(b),
-        followers=b.followers,
-        last_post_days=b.last_post_days if b.last_post_days is not None else "неизвестно",
-        reviews_count=b.reviews_count,
+def _prompt_for_business(business: Business) -> str:
+    """Build the minimal, privacy-bounded business payload for scoring."""
+    last_post_days = (
+        business.last_post_days
+        if business.last_post_days is not None
+        else "unknown"
     )
+    resolution_status = business.website_resolution_status or "unknown"
+    audit_status = business.website_audit_status or "unknown"
+    instagram_status = "active" if business.instagram_active else "inactive"
+    return (
+        f"Business name: {business.name}\n"
+        f"Niche: {business.niche}\n"
+        f"City: {business.city}\n"
+        f"Website status: {_site_status(business)}\n"
+        f"Website resolution status: {resolution_status}\n"
+        f"Website audit status: {audit_status}\n"
+        f"Instagram active: {instagram_status}\n"
+        f"Instagram followers: {business.followers}\n"
+        f"Instagram last post days: {last_post_days}\n"
+        f"Maps reviews: {business.reviews_count}"
+    )
+
+
+def _parse_response(text: object) -> Optional[dict]:
+    """Parse one complete JSON object; surrounding or nested free text is rejected."""
+    if not isinstance(text, str) or not text.strip():
+        return None
     try:
-        response = await client.messages.create(
-            model=config.AI_MODEL,
-            max_tokens=256,
-            messages=[{"role": "user", "content": prompt}],
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _validated_result(data: object) -> Optional[tuple[int, str, str]]:
+    """Validate the structured result again before it reaches the pipeline."""
+    if not isinstance(data, dict) or set(data) != {"score", "priority", "reason"}:
+        return None
+
+    score = data["score"]
+    priority = data["priority"]
+    reason = data["reason"]
+    if isinstance(score, bool) or not isinstance(score, int):
+        return None
+    if not 0 <= score <= 100:
+        return None
+    if priority not in {"hot", "warm", "cold"}:
+        return None
+    if not isinstance(reason, str):
+        return None
+
+    return score, _priority_from_score(score), reason[:500]
+
+
+def _safe_error_reason(exc: BaseException) -> str:
+    """Map SDK errors without serializing request or response details."""
+    error_name = type(exc).__name__.casefold()
+    if isinstance(exc, TimeoutError) or "timeout" in error_name:
+        category = "timeout"
+    elif "ratelimit" in error_name or "rate_limit" in error_name:
+        category = "rate_limit"
+    elif "authentication" in error_name or "permissiondenied" in error_name:
+        category = "authentication"
+    else:
+        category = "api_error"
+    return f"AI-скоринг недоступен: {category}"
+
+
+async def _score_one(client, business: Business) -> None:
+    """Score one business, falling back locally on every API/output failure."""
+    try:
+        response = await client.responses.create(
+            model=config.OPENAI_MODEL,
+            instructions=SCORING_INSTRUCTIONS,
+            input=_prompt_for_business(business),
+            max_output_tokens=config.OPENAI_SCORING_MAX_OUTPUT_TOKENS,
+            text=SCORING_TEXT_FORMAT,
+            tools=[],
+            store=False,
         )
-        text = next((blk.text for blk in response.content if blk.type == "text"), "")
-        data = _parse_response(text)
-        if not data or "score" not in data:
-            _fallback(b, "AI вернул некорректный ответ")
+        output_text = getattr(response, "output_text", None)
+        validated = _validated_result(_parse_response(output_text))
+        if validated is None:
+            _fallback(business, INVALID_RESPONSE_REASON)
             return
-        b.ai_score = max(0, min(100, int(data["score"])))
-        b.ai_priority = data.get("priority") or _priority_from_score(b.ai_score)
-        b.ai_reason = str(data.get("reason", ""))[:500]
-    except Exception as e:
-        # Любая ошибка API (лимиты, сеть) — нейтральная оценка, идём дальше
-        _fallback(b, f"AI недоступен: {type(e).__name__}")
+        business.ai_score, business.ai_priority, business.ai_reason = validated
+    except Exception as exc:
+        _fallback(business, _safe_error_reason(exc))
+
+
+async def _fallback_all(
+    businesses: List[Business],
+    reason: str,
+    progress_callback: Optional[ProgressCallback],
+) -> List[Business]:
+    total = len(businesses)
+    for index, business in enumerate(businesses, 1):
+        _fallback(business, reason)
+        if progress_callback:
+            await progress_callback(index, total)
+    return businesses
 
 
 async def score_businesses(
     businesses: List[Business],
     progress_callback: Optional[ProgressCallback] = None,
 ) -> List[Business]:
-    """Оценить все бизнесы. Возвращает тот же список с заполненными ai_* полями."""
-    if not config.ANTHROPIC_API_KEY:
-        # Ключ не задан — скоринг отключён, всем нейтральная оценка
-        for i, b in enumerate(businesses, 1):
-            _fallback(b, "AI-скоринг отключён (нет ANTHROPIC_API_KEY)")
-            if progress_callback:
-                await progress_callback(i, len(businesses))
-        return businesses
+    """Score businesses in place and return the original list."""
+    if config.OPENAI_SCORING_ENABLED != "true":
+        return await _fallback_all(
+            businesses,
+            "AI-скоринг отключён",
+            progress_callback,
+        )
 
-    # Импорт здесь, чтобы проект работал и без ключа/библиотеки
-    from anthropic import AsyncAnthropic
+    if not config.OPENAI_API_KEY:
+        return await _fallback_all(
+            businesses,
+            "AI-скоринг отключён (нет OPENAI_API_KEY)",
+            progress_callback,
+        )
 
-    client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
-    for i, b in enumerate(businesses, 1):
-        await _score_one(client, b)
+    try:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(
+            api_key=config.OPENAI_API_KEY,
+            timeout=config.OPENAI_SCORING_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return await _fallback_all(
+            businesses,
+            "AI-скоринг недоступен: sdk",
+            progress_callback,
+        )
+
+    total = len(businesses)
+    for index, business in enumerate(businesses, 1):
+        await _score_one(client, business)
         if progress_callback:
-            await progress_callback(i, len(businesses))
-        await asyncio.sleep(0.3)  # щадим рейт-лимиты
+            await progress_callback(index, total)
     return businesses
-
-
-if __name__ == "__main__":
-    # Ручной запуск на тестовых данных
-    import sys
-    from pathlib import Path
-
-    sys.stdout.reconfigure(encoding="utf-8")
-    data = json.loads(
-        (Path(__file__).parent.parent / "tests" / "stage3_result.json").read_text(encoding="utf-8")
-    )
-    items = [Business(**d) for d in data[:5]]
-    asyncio.run(score_businesses(items))
-    for biz in items:
-        print(f"- {biz.name}: score={biz.ai_score}, priority={biz.ai_priority} ({biz.ai_reason})")

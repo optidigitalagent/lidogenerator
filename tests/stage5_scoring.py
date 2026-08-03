@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Тест этапа 5: AI-скоринг 5 бизнесов из stage3_result.json."""
+"""Stage 5 smoke test: score five saved businesses or use the safe fallback."""
 
 import asyncio
 import json
@@ -15,30 +15,42 @@ from models import Business
 
 
 async def main():
-    data = json.loads((Path(__file__).parent / "stage3_result.json").read_text(encoding="utf-8"))
-    items = [Business(**d) for d in data[:5]]
+    data = json.loads(
+        (Path(__file__).parent / "stage3_result.json").read_text(encoding="utf-8")
+    )
+    items = [Business(**item) for item in data[:5]]
 
-    mode = "Claude API" if config.ANTHROPIC_API_KEY else "fallback (нет ключа)"
-    print(f"Режим скоринга: {mode}, модель: {config.AI_MODEL}\n")
+    mode = (
+        "OpenAI API"
+        if config.OPENAI_SCORING_ENABLED == "true" and config.OPENAI_API_KEY
+        else "fallback (scoring disabled)"
+    )
+    print(f"Scoring mode: {mode}, model: {config.OPENAI_MODEL}\n")
 
     await score_businesses(items)
 
     ok = True
-    for b in items:
-        print(f"- {b.name}")
-        print(f"  score={b.ai_score}, priority={b.ai_priority}, reason={b.ai_reason}")
-        if not (0 <= b.ai_score <= 100) or b.ai_priority not in ("hot", "warm", "cold"):
+    for business in items:
+        print(f"- {business.name}")
+        print(
+            f"  score={business.ai_score}, priority={business.ai_priority}, "
+            f"reason={business.ai_reason}"
+        )
+        if not 0 <= business.ai_score <= 100 or business.ai_priority not in {
+            "hot",
+            "warm",
+            "cold",
+        }:
             ok = False
 
-    # Сохраняем результат для следующих этапов
-    out = Path(__file__).parent / "stage5_result.json"
-    out.write_text(
-        json.dumps([b.to_dict() for b in items], ensure_ascii=False, indent=2),
+    output_path = Path(__file__).parent / "stage5_result.json"
+    output_path.write_text(
+        json.dumps([business.to_dict() for business in items], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
-    print("\nТЕСТ ПРОЙДЕН" if ok else "\nТЕСТ ПРОВАЛЕН")
-    sys.exit(0 if ok else 1)
+    print("\nTEST PASSED" if ok else "\nTEST FAILED")
+    raise SystemExit(0 if ok else 1)
 
 
 if __name__ == "__main__":

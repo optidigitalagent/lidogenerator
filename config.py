@@ -16,7 +16,6 @@ load_dotenv(BASE_DIR / ".env")
 
 # --- Токены ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 # --- База данных ---
 DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "lead_hunter.db"))
@@ -86,6 +85,13 @@ def _environment_float(
     return value
 
 
+def _environment_boolean(name: str, default: str) -> str:
+    raw = os.getenv(name, default).strip().casefold()
+    if raw not in {"true", "false"}:
+        raise ValueError(f"{name} must be true or false")
+    return raw
+
+
 WEBSITE_SEARCH_PROVIDER = os.getenv("WEBSITE_SEARCH_PROVIDER", "none").strip().casefold()
 if WEBSITE_SEARCH_PROVIDER not in {"none", "brave"}:
     raise ValueError("WEBSITE_SEARCH_PROVIDER must be one of: none, brave")
@@ -113,9 +119,22 @@ MAX_WEBSITE_SEARCH_REQUESTS_PER_TASK = _environment_integer(
 )
 
 # --- AI-скоринг ---
-# В техплане указан claude-haiku-3-5, но он выведен из эксплуатации (19.02.2026).
-# claude-haiku-4-5 — официальная замена, та же цена ($1/$5 за 1M токенов).
-AI_MODEL = "claude-haiku-4-5"
+# OpenAI scoring is opt-in so imports and paid requests stay off by default.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano").strip()
+OPENAI_SCORING_ENABLED = _environment_boolean("OPENAI_SCORING_ENABLED", "false")
+OPENAI_SCORING_MAX_OUTPUT_TOKENS = _environment_integer(
+    "OPENAI_SCORING_MAX_OUTPUT_TOKENS",
+    "256",
+    64,
+    1024,
+)
+OPENAI_SCORING_TIMEOUT_SECONDS = _environment_float(
+    "OPENAI_SCORING_TIMEOUT_SECONDS",
+    "20",
+    0.0,
+    60.0,
+)
 
 # --- Прогресс ---
 PROGRESS_INTERVAL = 180         # отправлять прогресс каждые 3 минуты (180 сек)
