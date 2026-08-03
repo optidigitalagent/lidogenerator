@@ -22,10 +22,12 @@ INVALID_RESPONSE_REASON = "AI вернул некорректный ответ"
 EMPTY_RESPONSE_REASON = "AI вернул пустой ответ"
 SCORING_UNAVAILABLE_PREFIX = "AI-скоринг недоступен: "
 
+# API schema stays within the conservative Structured Outputs subset;
+# numeric bounds are enforced again in application code.
 SCORING_SCHEMA = {
     "type": "object",
     "properties": {
-        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "score": {"type": "integer"},
         "priority": {"type": "string", "enum": ["hot", "warm", "cold"]},
         "reason": {"type": "string"},
     },
@@ -187,17 +189,88 @@ def _validated_result(data: object) -> Optional[tuple[int, str, str]]:
     return score, _priority_from_score(score), reason[:500]
 
 
+def _safe_error_attribute(exc: BaseException, name: str) -> object:
+    """Read one explicit SDK error attribute without serializing the error."""
+    try:
+        return getattr(exc, name, None)
+    except Exception:
+        return None
+
+
+def _safe_error_code(exc: BaseException) -> Optional[str]:
+    """Return one allowlisted, short SDK machine code when available."""
+    code = _safe_error_attribute(exc, "code")
+    if not isinstance(code, str) or len(code) > 64:
+        return None
+    normalized = code.strip().casefold()
+    if normalized in {
+        "insufficient_quota",
+        "model_not_found",
+        "invalid_api_key",
+        "rate_limit_exceeded",
+    }:
+        return normalized
+    return None
+
+
+def _safe_error_category(exc: BaseException) -> str:
+    """Classify an SDK error using only safe machine-readable metadata."""
+    error_name = type(exc).__name__.casefold()
+    status_code = _safe_error_attribute(exc, "status_code")
+    if isinstance(status_code, bool) or not isinstance(status_code, int):
+        status_code = None
+    code = _safe_error_code(exc)
+
+    if isinstance(exc, TimeoutError) or "timeout" in error_name:
+        return "timeout"
+    if code == "insufficient_quota":
+        return "insufficient_quota"
+    if (
+        "ratelimit" in error_name
+        or "rate_limit" in error_name
+        or status_code == 429
+        or code == "rate_limit_exceeded"
+    ):
+        return "rate_limit"
+    if (
+        "authentication" in error_name
+        or status_code == 401
+        or code == "invalid_api_key"
+    ):
+        return "authentication"
+    if (
+        "permissiondenied" in error_name
+        or "permission_denied" in error_name
+        or status_code == 403
+    ):
+        return "permission"
+    if (
+        "notfound" in error_name
+        or "not_found" in error_name
+        or status_code == 404
+        or code == "model_not_found"
+    ):
+        return "model_not_found"
+    if (
+        "badrequest" in error_name
+        or "bad_request" in error_name
+        or status_code in {400, 422}
+    ):
+        return "bad_request"
+    if "connection" in error_name:
+        return "connection"
+    if (
+        "internalserver" in error_name
+        or "internal_server" in error_name
+        or (status_code is not None and 500 <= status_code <= 599)
+    ):
+        return "server_error"
+    return "api_error"
+
+
 def _safe_error_reason(exc: BaseException) -> str:
     """Map SDK errors without serializing request or response details."""
-    error_name = type(exc).__name__.casefold()
-    if isinstance(exc, TimeoutError) or "timeout" in error_name:
-        category = "timeout"
-    elif "ratelimit" in error_name or "rate_limit" in error_name:
-        category = "rate_limit"
-    elif "authentication" in error_name or "permissiondenied" in error_name:
-        category = "authentication"
-    else:
-        category = "api_error"
+    category = _safe_error_category(exc)
     return f"AI-скоринг недоступен: {category}"
 
 

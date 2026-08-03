@@ -204,6 +204,28 @@ def _fake_openai_module(queue):
     return module, client_calls, request_calls
 
 
+def _sdk_error(name, *, status_code=None, code=None, param=None):
+    class SafeFakeError(Exception):
+        def __str__(self):
+            raise AssertionError("error text must not be read")
+
+    SafeFakeError.__name__ = name
+    error = SafeFakeError("SECRET_RAW_MESSAGE sk-FAKE_API_KEY")
+    if status_code is not None:
+        error.status_code = status_code
+    if code is not None:
+        error.code = code
+    if param is not None:
+        error.param = param
+    error.request = types.SimpleNamespace(url="https://api.openai.test/SECRET_URL")
+    error.response = types.SimpleNamespace(
+        body={"secret": "SECRET_RESPONSE_BODY"},
+        headers={"x-request-id": "SECRET_REQUEST_ID"},
+    )
+    error.request_id = "SECRET_REQUEST_ID"
+    return error
+
+
 class OpenAIScorerTests(unittest.IsolatedAsyncioTestCase):
     def _config_patch(self, *, enabled="true", key="test-key"):
         return patch.multiple(
@@ -430,6 +452,7 @@ class OpenAIScorerTests(unittest.IsolatedAsyncioTestCase):
             "prefix {\"score\": 80, \"priority\": \"hot\", \"reason\": \"x\"}",
             json.dumps([{"score": 80, "priority": "hot", "reason": "x"}]),
             json.dumps({"score": True, "priority": "hot", "reason": "x"}),
+            json.dumps({"score": 50.0, "priority": "warm", "reason": "x"}),
             json.dumps({"score": -1, "priority": "cold", "reason": "x"}),
             json.dumps({"score": 101, "priority": "hot", "reason": "x"}),
             json.dumps({"score": 50, "priority": "urgent", "reason": "x"}),
@@ -482,6 +505,87 @@ class OpenAIScorerTests(unittest.IsolatedAsyncioTestCase):
                     f"AI-скоринг недоступен: {category}",
                 )
                 self.assertNotIn("SECRET", business.ai_reason)
+
+    def test_complete_error_category_mapping_uses_safe_metadata(self):
+        cases = (
+            (_sdk_error("APITimeoutError"), "timeout"),
+            (TimeoutError("SECRET_TIMEOUT"), "timeout"),
+            (
+                _sdk_error("RateLimitError", code="rate_limit_exceeded"),
+                "rate_limit",
+            ),
+            (
+                _sdk_error(
+                    "RateLimitError",
+                    status_code=429,
+                    code="insufficient_quota",
+                ),
+                "insufficient_quota",
+            ),
+            (_sdk_error("AuthenticationError"), "authentication"),
+            (_sdk_error("APIStatusError", status_code=401), "authentication"),
+            (_sdk_error("APIError", code="invalid_api_key"), "authentication"),
+            (_sdk_error("PermissionDeniedError"), "permission"),
+            (_sdk_error("APIStatusError", status_code=403), "permission"),
+            (_sdk_error("NotFoundError"), "model_not_found"),
+            (_sdk_error("APIStatusError", status_code=404), "model_not_found"),
+            (_sdk_error("APIError", code="model_not_found"), "model_not_found"),
+            (_sdk_error("BadRequestError"), "bad_request"),
+            (_sdk_error("APIStatusError", status_code=400), "bad_request"),
+            (_sdk_error("APIStatusError", status_code=422), "bad_request"),
+            (_sdk_error("APIConnectionError"), "connection"),
+            (_sdk_error("InternalServerError"), "server_error"),
+            (_sdk_error("APIStatusError", status_code=500), "server_error"),
+            (_sdk_error("APIError"), "api_error"),
+        )
+        for error, category in cases:
+            with self.subTest(category=category):
+                self.assertEqual(ai_scorer._safe_error_category(error), category)
+
+    def test_error_categories_ignore_unsafe_metadata(self):
+        error = _sdk_error(
+            "APIError",
+            code="arbitrary_secret_code",
+            param="arbitrary_secret_param",
+        )
+        reason = ai_scorer._safe_error_reason(error)
+        self.assertEqual(reason, f"{ai_scorer.SCORING_UNAVAILABLE_PREFIX}api_error")
+        for private_value in (
+            "SECRET_RAW_MESSAGE",
+            "sk-FAKE_API_KEY",
+            "SECRET_URL",
+            "SECRET_RESPONSE_BODY",
+            "SECRET_REQUEST_ID",
+            "arbitrary_secret_code",
+            "arbitrary_secret_param",
+        ):
+            self.assertNotIn(private_value, reason)
+
+    async def test_bad_request_pipeline_fallback_is_safe(self):
+        error = _sdk_error("BadRequestError", status_code=400)
+        module, _, _ = _fake_openai_module([error])
+        business = Business()
+        with self._config_patch(), patch.dict(sys.modules, {"openai": module}):
+            await ai_scorer.score_businesses([business])
+        self.assertEqual(
+            business.ai_reason,
+            f"{ai_scorer.SCORING_UNAVAILABLE_PREFIX}bad_request",
+        )
+
+    async def test_insufficient_quota_pipeline_fallback_is_safe(self):
+        error = _sdk_error(
+            "RateLimitError",
+            status_code=429,
+            code="insufficient_quota",
+        )
+        module, _, _ = _fake_openai_module([error])
+        business = Business()
+        with self._config_patch(), patch.dict(sys.modules, {"openai": module}):
+            await ai_scorer.score_businesses([business])
+        self.assertEqual(
+            business.ai_reason,
+            f"{ai_scorer.SCORING_UNAVAILABLE_PREFIX}insufficient_quota",
+        )
 
     async def test_one_business_failure_does_not_stop_the_next(self):
         error = type("APIError", (Exception,), {})("private request details")
@@ -554,7 +658,34 @@ class OpenAIScorerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ai_scorer.SCORING_SCHEMA["additionalProperties"])
         self.assertEqual(
             ai_scorer.SCORING_SCHEMA["properties"]["score"],
-            {"type": "integer", "minimum": 0, "maximum": 100},
+            {"type": "integer"},
+        )
+        self.assertEqual(
+            ai_scorer.SCORING_SCHEMA["properties"]["priority"]["enum"],
+            ["hot", "warm", "cold"],
+        )
+        forbidden_keywords = {
+            "minimum",
+            "maximum",
+            "minLength",
+            "maxLength",
+            "pattern",
+            "format",
+            "examples",
+            "default",
+        }
+
+        def schema_keys(value):
+            if isinstance(value, dict):
+                for key, nested_value in value.items():
+                    yield key
+                    yield from schema_keys(nested_value)
+            elif isinstance(value, list):
+                for nested_value in value:
+                    yield from schema_keys(nested_value)
+
+        self.assertTrue(
+            forbidden_keywords.isdisjoint(schema_keys(ai_scorer.SCORING_SCHEMA))
         )
         source = inspect.getsource(ai_scorer).casefold()
         self.assertNotIn("anthropic", source)
