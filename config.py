@@ -46,6 +46,10 @@ INSTAGRAM_DELAY_MAX = 8         # задержка между профилями
 SITE_CHECK_TIMEOUT = 10         # таймаут проверки сайта, сек
 SITE_CHECK_CONCURRENCY = 5      # не более 5 одновременных HTTP-запросов
 
+WEBSITE_RESOLVER_MODE = os.getenv("WEBSITE_RESOLVER_MODE", "shadow").strip().casefold()
+if WEBSITE_RESOLVER_MODE not in {"off", "shadow", "strict"}:
+    raise ValueError("WEBSITE_RESOLVER_MODE must be one of: off, shadow, strict")
+
 # --- AI-скоринг ---
 # В техплане указан claude-haiku-3-5, но он выведен из эксплуатации (19.02.2026).
 # claude-haiku-4-5 — официальная замена, та же цена ($1/$5 за 1M токенов).

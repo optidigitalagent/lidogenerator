@@ -5,24 +5,27 @@
   - сайт не указан → has_site=False, site_quality="none"  (лид: no website)
   - "сайт" — это ссылка на соцсеть/агрегатор (Facebook, linktr.ee, Booksy...)
     → has_site=False, site_quality="none"  (настоящего сайта нет)
-  - сайт не открывается / 4xx / 5xx → has_site=False, site_quality="dead" (no website)
+  - только подтверждённые 404/410 → site_quality="dead" (no website)
+  - timeout/DNS/connect, блокирующие 4xx, 429 и 5xx → technical_error
+  - прочие неоднозначные 4xx → uncertain (не лид)
   - сайт открывается → эвристический вердикт по содержимому страницы:
       site_quality="bad"  — явные признаки старого/слабого сайта (лид: bad website)
       site_quality="good" — признаков проблем нет (лид отсеивается)
 
-Запросы асинхронные, не более 5 одновременно.
+Запросы асинхронные, не более 5 одновременно. DNS/private-IP проверки каждого
+redirect hop остаются задачей сетевого адаптера Phase 4.
 """
 
 import asyncio
 import re
 import time
 from typing import Awaitable, Callable, List, Optional
-from urllib.parse import urlparse
-
 import httpx
 
 import config
 from models import Business
+from website_pipeline import WebsiteAuditStatus, serialize_audit_evidence
+from website_resolution import CandidateKind, classify_candidate_url, normalize_candidate_url
 
 ProgressCallback = Callable[[int, int], Awaitable[None]]
 
@@ -32,18 +35,6 @@ HEADERS = {
                   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Accept-Language": "uk-UA,uk;q=0.9,ru;q=0.8,en;q=0.7",
 }
-
-# Домены, которые НЕ являются собственным сайтом бизнеса:
-# соцсети, мессенджеры, линк-агрегаторы, маркетплейсы, записочные сервисы.
-NOT_A_WEBSITE_DOMAINS = (
-    "facebook.com", "m.facebook.com", "fb.com", "instagram.com", "tiktok.com",
-    "youtube.com", "t.me", "telegram.me", "wa.me", "api.whatsapp.com",
-    "viber.com", "invite.viber.com",
-    "linktr.ee", "taplink.cc", "taplink.ws", "lnk.bio", "linkin.bio", "mssg.me",
-    "booksy.com", "n716.alteg.io", "alteg.io", "easyweek.com.ua", "dikidi.net",
-    "olx.ua", "prom.ua", "rozetka.com.ua", "business.site", "google.com",
-    "goo.gl", "maps.app.goo.gl",
-)
 
 # Маркеры устаревших технологий / бесплатных конструкторов 2000-х в HTML
 OLD_TECH_MARKERS = (
@@ -56,11 +47,31 @@ OLD_TECH_MARKERS = (
 
 def _is_real_website(url: str) -> bool:
     """Ссылка ведёт на собственный сайт, а не на соцсеть/агрегатор?"""
-    host = (urlparse(url if "://" in url else "https://" + url).hostname or "").lower()
-    host = host.removeprefix("www.")
-    return bool(host) and not any(
-        host == d or host.endswith("." + d) for d in NOT_A_WEBSITE_DOMAINS
-    )
+    try:
+        return classify_candidate_url(normalize_candidate_url(url)) not in {
+            CandidateKind.SOCIAL_PROFILE,
+            CandidateKind.LINK_IN_BIO,
+            CandidateKind.MARKETPLACE_OR_AGGREGATOR,
+            CandidateKind.DIRECTORY,
+        }
+    except (TypeError, ValueError):
+        return False
+
+
+def _store_audit(
+    b: Business,
+    status: WebsiteAuditStatus,
+    *,
+    http_status: int | None = None,
+    final_url: str = "",
+    evidence: tuple[str, ...] = (),
+    error: str = "",
+) -> None:
+    b.website_audit_status = status.value
+    b.website_audit_http_status = http_status
+    b.website_final_url = final_url
+    b.website_audit_evidence = serialize_audit_evidence(evidence)
+    b.website_audit_error = error
 
 
 def _visible_text(html: str) -> str:
@@ -110,31 +121,147 @@ def _analyze(html: str, final_url: str, elapsed: float) -> str:
 
 async def _check_one(client: httpx.AsyncClient, sem: asyncio.Semaphore, b: Business) -> None:
     """Проверить один бизнес. Результат пишется прямо в объект."""
-    if not b.website or not _is_real_website(b.website):
-        # Сайта нет, либо вместо сайта — соцсеть/агрегатор (booksy, linktr.ee...)
+    raw_url = b.effective_website_url
+    if not raw_url:
         b.has_site = False
         b.site_quality = "none"
+        _store_audit(
+            b,
+            WebsiteAuditStatus.NO_OFFICIAL_SITE,
+            evidence=("no_official_site",),
+        )
         return
 
-    url = b.website
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
+    try:
+        url = normalize_candidate_url(raw_url)
+        kind = classify_candidate_url(url)
+    except (TypeError, ValueError):
+        b.has_site = False
+        b.site_quality = "technical_error"
+        _store_audit(
+            b,
+            WebsiteAuditStatus.TECHNICAL_ERROR,
+            evidence=("invalid_candidate_url",),
+            error="invalid_candidate_url",
+        )
+        return
+
+    if kind in {
+        CandidateKind.SOCIAL_PROFILE,
+        CandidateKind.LINK_IN_BIO,
+        CandidateKind.MARKETPLACE_OR_AGGREGATOR,
+        CandidateKind.DIRECTORY,
+    }:
+        b.has_site = False
+        b.site_quality = "none"
+        _store_audit(
+            b,
+            WebsiteAuditStatus.NO_OFFICIAL_SITE,
+            evidence=("non_official_platform", f"candidate_kind:{kind.value}"),
+        )
+        return
 
     async with sem:  # не более 5 одновременных запросов
         try:
             start = time.monotonic()
             resp = await client.get(url)
             elapsed = time.monotonic() - start
-            if resp.status_code < 400:
+            final_url = normalize_candidate_url(str(resp.url))
+            final_kind = classify_candidate_url(final_url)
+            base_evidence = (
+                f"http_status:{resp.status_code}",
+                f"final_candidate_kind:{final_kind.value}",
+            )
+            if final_kind in {
+                CandidateKind.SOCIAL_PROFILE,
+                CandidateKind.LINK_IN_BIO,
+                CandidateKind.MARKETPLACE_OR_AGGREGATOR,
+                CandidateKind.DIRECTORY,
+            }:
+                b.has_site = False
+                b.site_quality = "none"
+                _store_audit(
+                    b,
+                    WebsiteAuditStatus.NO_OFFICIAL_SITE,
+                    http_status=resp.status_code,
+                    final_url=final_url,
+                    evidence=base_evidence + ("redirected_to_non_official_platform",),
+                )
+            elif resp.status_code < 400:
                 b.has_site = True
                 b.site_quality = _analyze(resp.text, str(resp.url), elapsed)
-            else:
-                # Сайт указан, но отдаёт ошибку — фактически сайта нет
+                audit_status = (
+                    WebsiteAuditStatus.GOOD
+                    if b.site_quality == "good"
+                    else WebsiteAuditStatus.BAD
+                )
+                _store_audit(
+                    b,
+                    audit_status,
+                    http_status=resp.status_code,
+                    final_url=final_url,
+                    evidence=base_evidence + (f"quality:{b.site_quality}",),
+                )
+            elif resp.status_code in {404, 410}:
                 b.has_site = False
                 b.site_quality = "dead"
-        except Exception:
+                _store_audit(
+                    b,
+                    WebsiteAuditStatus.DEAD_CONFIRMED,
+                    http_status=resp.status_code,
+                    final_url=final_url,
+                    evidence=base_evidence + ("dead_confirmed",),
+                )
+            elif resp.status_code in {401, 403, 407, 408, 409, 425, 429} or resp.status_code >= 500:
+                b.has_site = False
+                b.site_quality = "technical_error"
+                error = f"http_status_{resp.status_code}"
+                _store_audit(
+                    b,
+                    WebsiteAuditStatus.TECHNICAL_ERROR,
+                    http_status=resp.status_code,
+                    final_url=final_url,
+                    evidence=base_evidence + ("technical_error",),
+                    error=error,
+                )
+            else:
+                b.has_site = False
+                b.site_quality = "uncertain"
+                _store_audit(
+                    b,
+                    WebsiteAuditStatus.UNCERTAIN,
+                    http_status=resp.status_code,
+                    final_url=final_url,
+                    evidence=base_evidence + ("http_status_uncertain",),
+                )
+        except httpx.TimeoutException:
             b.has_site = False
-            b.site_quality = "dead"
+            b.site_quality = "technical_error"
+            _store_audit(
+                b,
+                WebsiteAuditStatus.TECHNICAL_ERROR,
+                evidence=("timeout",),
+                error="timeout",
+            )
+        except httpx.RequestError:
+            b.has_site = False
+            b.site_quality = "technical_error"
+            _store_audit(
+                b,
+                WebsiteAuditStatus.TECHNICAL_ERROR,
+                evidence=("request_error",),
+                error="request_error",
+            )
+        except Exception as exc:
+            b.has_site = False
+            b.site_quality = "technical_error"
+            error = f"unexpected_error:{type(exc).__name__}"
+            _store_audit(
+                b,
+                WebsiteAuditStatus.TECHNICAL_ERROR,
+                evidence=("unexpected_error",),
+                error=error,
+            )
 
 
 async def check_sites(
@@ -149,7 +276,9 @@ async def check_sites(
         timeout=config.SITE_CHECK_TIMEOUT,
         follow_redirects=True,
         headers=HEADERS,
-        verify=False,  # самоподписанные сертификаты не повод считать сайт мёртвым
+        # Legacy limitation: redirects are not DNS/private-IP guarded per hop,
+        # and certificate verification remains disabled until the Phase 4 adapter.
+        verify=False,
     ) as client:
         async def worker(b: Business):
             nonlocal done

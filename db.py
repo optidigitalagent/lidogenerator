@@ -2,18 +2,24 @@
 """SQLite: хранение задач поиска и найденных бизнесов."""
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 import config
 from models import Business
 
 
-def _connect() -> sqlite3.Connection:
+@contextmanager
+def _connect() -> Iterator[sqlite3.Connection]:
     """Открыть соединение с базой (одно на операцию — безопасно для потоков)."""
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
@@ -53,7 +59,22 @@ def init_db() -> None:
                 last_post_days   INTEGER,
                 ai_score         INTEGER DEFAULT 0,
                 ai_priority      TEXT DEFAULT '',
-                ai_reason        TEXT DEFAULT ''
+                ai_reason        TEXT DEFAULT '',
+                website_original_url TEXT DEFAULT '',
+                instagram_bio_url TEXT DEFAULT '',
+                website_resolved_url TEXT DEFAULT '',
+                website_final_url TEXT DEFAULT '',
+                website_resolution_status TEXT DEFAULT '',
+                website_resolution_source TEXT DEFAULT '',
+                website_resolution_confidence REAL DEFAULT 0,
+                website_resolution_evidence TEXT DEFAULT '',
+                website_resolution_error TEXT DEFAULT '',
+                website_audit_status TEXT DEFAULT '',
+                website_audit_http_status INTEGER,
+                website_audit_evidence TEXT DEFAULT '',
+                website_audit_error TEXT DEFAULT '',
+                lead_decision TEXT DEFAULT '',
+                lead_decision_reason TEXT DEFAULT ''
             );
 
             -- Дубликаты по телефону внутри одной задачи не сохраняем
@@ -61,6 +82,36 @@ def init_db() -> None:
                 ON businesses(task_id, phone) WHERE phone != '';
             """
         )
+        _migrate_businesses(conn)
+
+
+_BUSINESS_MIGRATIONS = {
+    "website_original_url": "TEXT DEFAULT ''",
+    "instagram_bio_url": "TEXT DEFAULT ''",
+    "website_resolved_url": "TEXT DEFAULT ''",
+    "website_final_url": "TEXT DEFAULT ''",
+    "website_resolution_status": "TEXT DEFAULT ''",
+    "website_resolution_source": "TEXT DEFAULT ''",
+    "website_resolution_confidence": "REAL DEFAULT 0",
+    "website_resolution_evidence": "TEXT DEFAULT ''",
+    "website_resolution_error": "TEXT DEFAULT ''",
+    "website_audit_status": "TEXT DEFAULT ''",
+    "website_audit_http_status": "INTEGER",
+    "website_audit_evidence": "TEXT DEFAULT ''",
+    "website_audit_error": "TEXT DEFAULT ''",
+    "lead_decision": "TEXT DEFAULT ''",
+    "lead_decision_reason": "TEXT DEFAULT ''",
+}
+
+
+def _migrate_businesses(conn: sqlite3.Connection) -> None:
+    """Add Phase 3 columns to an existing table without rebuilding it."""
+    existing = {
+        row["name"] for row in conn.execute("PRAGMA table_info(businesses)")
+    }
+    for name, declaration in _BUSINESS_MIGRATIONS.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE businesses ADD COLUMN {name} {declaration}")
 
 
 # ---------- Задачи ----------
@@ -116,6 +167,12 @@ _BUSINESS_COLUMNS = (
     "instagram_url", "rating", "reviews_count", "has_site", "site_quality",
     "instagram_active", "followers", "posts_count", "last_post_days",
     "ai_score", "ai_priority", "ai_reason",
+    "website_original_url", "instagram_bio_url", "website_resolved_url",
+    "website_final_url", "website_resolution_status", "website_resolution_source",
+    "website_resolution_confidence", "website_resolution_evidence",
+    "website_resolution_error", "website_audit_status",
+    "website_audit_http_status", "website_audit_evidence", "website_audit_error",
+    "lead_decision", "lead_decision_reason",
 )
 
 
@@ -147,14 +204,25 @@ def update_business(b: Business) -> None:
         return
     with _connect() as conn:
         conn.execute(
-            "UPDATE businesses SET has_site=?, site_quality=?, instagram_active=?, "
+            "UPDATE businesses SET website=?, has_site=?, site_quality=?, instagram_active=?, "
             "followers=?, posts_count=?, last_post_days=?, ai_score=?, ai_priority=?, ai_reason=?, "
-            "instagram_url=? WHERE id=?",
+            "instagram_url=?, website_original_url=?, instagram_bio_url=?, "
+            "website_resolved_url=?, website_final_url=?, website_resolution_status=?, "
+            "website_resolution_source=?, website_resolution_confidence=?, "
+            "website_resolution_evidence=?, website_resolution_error=?, website_audit_status=?, "
+            "website_audit_http_status=?, website_audit_evidence=?, website_audit_error=?, "
+            "lead_decision=?, lead_decision_reason=? WHERE id=?",
             (
-                int(b.has_site), b.site_quality, int(b.instagram_active),
+                b.website, int(b.has_site), b.site_quality, int(b.instagram_active),
                 b.followers, b.posts_count, b.last_post_days,
                 b.ai_score, b.ai_priority, b.ai_reason,
-                b.instagram_url, b.id,
+                b.instagram_url, b.website_original_url, b.instagram_bio_url,
+                b.website_resolved_url, b.website_final_url,
+                b.website_resolution_status, b.website_resolution_source,
+                b.website_resolution_confidence, b.website_resolution_evidence,
+                b.website_resolution_error, b.website_audit_status,
+                b.website_audit_http_status, b.website_audit_evidence,
+                b.website_audit_error, b.lead_decision, b.lead_decision_reason, b.id,
             ),
         )
 

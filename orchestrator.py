@@ -21,8 +21,10 @@ from typing import Awaitable, Callable, List, Optional
 import city_catalog
 import config
 import db
-from agents import collector, site_checker, social_checker, ai_scorer, reporter
+from agents import collector, site_checker, social_checker, ai_scorer, reporter, website_resolver
 from models import Business
+from website_candidate_matching import SearchProvider
+from website_pipeline import LeadDecision, ResolverMode, parse_resolver_mode, qualify_lead
 from niche_catalog import resolve_niche_plan
 from query_budget import allocate_query_budget
 from query_planner import build_query_queue
@@ -116,6 +118,7 @@ async def run_search(
     progress_callback: Optional[ReportCallback] = None,
     stop_event: Optional[asyncio.Event] = None,
     progress_interval: int = None,
+    website_search_provider: SearchProvider | None = None,
 ) -> Optional[str]:
     """Полный цикл поиска для задачи task_id.
 
@@ -139,6 +142,7 @@ async def run_search(
     )
     interval = progress_interval if progress_interval is not None else config.PROGRESS_INTERVAL
     progress = _Progress(progress_callback, interval, stop_event)
+    resolver_mode = parse_resolver_mode(config.WEBSITE_RESOLVER_MODE)
     stop_flag = (lambda: stop_event.is_set()) if stop_event else None
 
     # Накопители по ходу батчевого сбора
@@ -147,6 +151,7 @@ async def run_search(
     checked_candidates = 0              # уникальные кандидаты с завершённой проверкой сайта
     skipped_no_instagram = 0            # пропущено: нет Instagram
     skipped_good_site = 0               # пропущено: есть Instagram, но хороший сайт
+    skipped_uncertain_website = 0       # пропущено: результат сайта недостаточно надёжен
     stop_reason: Optional[StopReason] = None
     seen_business_keys: set[tuple[str, ...]] = set()
     niche_plan = resolve_niche_plan(niche)
@@ -204,6 +209,7 @@ async def run_search(
             f"Знайдено валідних лідів: {len(leads)}/{target_leads}\n"
             f"Пропущено без Instagram: {skipped_no_instagram}\n"
             f"Пропущено з гарним сайтом: {skipped_good_site}\n"
+            f"Пропущено через невизначений статус сайту: {skipped_uncertain_website}\n"
             f"Додано без сайту: {added_no_site}\n"
             f"Додано з поганим сайтом: {added_bad_site}",
             force=force,
@@ -290,9 +296,28 @@ async def run_search(
                     unique_batch.append(business)
 
                 if unique_batch:
+                    if resolver_mode is not ResolverMode.OFF:
+                        await website_resolver.resolve_business_websites(
+                            unique_batch,
+                            provider=website_search_provider,
+                        )
                     # Проверяем сайты у уникальных бизнесов батча (быстро, параллельно)
                     await site_checker.check_sites(unique_batch)
                     checked_candidates += len(unique_batch)
+
+                    if resolver_mode is ResolverMode.STRICT:
+                        for business in unique_batch:
+                            qualification = qualify_lead(
+                                has_instagram=bool(business.instagram_url),
+                                resolution=website_resolver.resolution_from_business(business),
+                                audit=website_resolver.audit_from_business(business),
+                            )
+                            business.lead_decision = qualification.decision.value
+                            business.lead_decision_reason = qualification.reason
+                    else:
+                        for business in unique_batch:
+                            business.lead_decision = ""
+                            business.lead_decision_reason = ""
 
                     # Отбираем валидные лиды из батча
                     for b in unique_batch:
@@ -303,6 +328,11 @@ async def run_search(
                             skipped_no_instagram += 1
                         elif b.website_status == "good website":
                             skipped_good_site += 1
+                        elif (
+                            b.website_status == "uncertain website"
+                            or b.lead_decision == LeadDecision.UNCERTAIN.value
+                        ):
+                            skipped_uncertain_website += 1
 
                 decision = _decide(remaining_queries=active_remaining_queries)
                 if not decision.should_continue:
@@ -394,6 +424,7 @@ async def run_search(
             f"Перевірено унікальних кандидатів: {checked_candidates}/{policy.max_candidates}\n"
             f"Пропущено без Instagram: {skipped_no_instagram}\n"
             f"Пропущено з гарним сайтом: {skipped_good_site}\n"
+            f"Пропущено через невизначений статус сайту: {skipped_uncertain_website}\n"
             f"Додано без сайту: {added_no_site}\n"
             f"Додано з поганим сайтом: {added_bad_site}\n"
             f"➡️ Усього лідів у таблиці: {len(leads)}\n"
