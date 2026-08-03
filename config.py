@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """Конфигурация: читает .env с токенами и настройками."""
 
+import math
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -45,6 +47,70 @@ INSTAGRAM_DELAY_MIN = 5         # задержка между профилями
 INSTAGRAM_DELAY_MAX = 8         # задержка между профилями Instagram, сек (до)
 SITE_CHECK_TIMEOUT = 10         # таймаут проверки сайта, сек
 SITE_CHECK_CONCURRENCY = 5      # не более 5 одновременных HTTP-запросов
+
+WEBSITE_RESOLVER_MODE = os.getenv("WEBSITE_RESOLVER_MODE", "shadow").strip().casefold()
+if WEBSITE_RESOLVER_MODE not in {"off", "shadow", "strict"}:
+    raise ValueError("WEBSITE_RESOLVER_MODE must be one of: off, shadow, strict")
+
+
+def _environment_integer(
+    name: str,
+    default: str,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = os.getenv(name, default).strip()
+    if re.fullmatch(r"[+-]?[0-9]+", raw) is None:
+        raise ValueError(f"{name} must be an integer")
+    value = int(raw)
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _environment_float(
+    name: str,
+    default: str,
+    minimum_exclusive: float,
+    maximum: float,
+) -> float:
+    raw = os.getenv(name, default).strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a number") from None
+    if not math.isfinite(value) or not minimum_exclusive < value <= maximum:
+        raise ValueError(
+            f"{name} must be greater than {minimum_exclusive:g} and at most {maximum:g}"
+        )
+    return value
+
+
+WEBSITE_SEARCH_PROVIDER = os.getenv("WEBSITE_SEARCH_PROVIDER", "none").strip().casefold()
+if WEBSITE_SEARCH_PROVIDER not in {"none", "brave"}:
+    raise ValueError("WEBSITE_SEARCH_PROVIDER must be one of: none, brave")
+
+BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY", "").strip()
+BRAVE_SEARCH_COUNTRY = os.getenv("BRAVE_SEARCH_COUNTRY", "UA").strip()
+BRAVE_SEARCH_LANGUAGE = os.getenv("BRAVE_SEARCH_LANGUAGE", "").strip()
+BRAVE_SEARCH_UI_LANGUAGE = os.getenv("BRAVE_SEARCH_UI_LANGUAGE", "uk-UA").strip()
+BRAVE_SEARCH_SAFESEARCH = os.getenv(
+    "BRAVE_SEARCH_SAFESEARCH",
+    "moderate",
+).strip().casefold()
+BRAVE_SEARCH_MAX_RESULTS = _environment_integer("BRAVE_SEARCH_MAX_RESULTS", "5", 1, 10)
+BRAVE_SEARCH_TIMEOUT_SECONDS = _environment_float(
+    "BRAVE_SEARCH_TIMEOUT_SECONDS",
+    "10",
+    0.0,
+    30.0,
+)
+MAX_WEBSITE_SEARCH_REQUESTS_PER_TASK = _environment_integer(
+    "MAX_WEBSITE_SEARCH_REQUESTS_PER_TASK",
+    "0",
+    0,
+    1000,
+)
 
 # --- AI-скоринг ---
 # В техплане указан claude-haiku-3-5, но он выведен из эксплуатации (19.02.2026).

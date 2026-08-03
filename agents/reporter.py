@@ -4,8 +4,8 @@
 В таблицу попадают ТОЛЬКО лиды (есть Instagram И нет сайта/сайт плохой) —
 бизнесы с хорошими сайтами и без Instagram отсеиваются.
 
-Колонок ровно четыре, ничего лишнего:
-    Business Name | City | Instagram URL | Website Status
+Экспорт включает основные поля лида и детерминированные resolver/audit evidence,
+но не включает HTML, provider payloads или секреты.
 
 Файл пишется в UTF-8 с BOM (Excel сразу показывает кириллицу правильно),
 разделитель ";" (Excel с украинской/русской локалью корректно делит колонки).
@@ -25,7 +25,15 @@ COLUMNS = [
     ("Business Name", lambda b: b.name),
     ("City", lambda b: b.city),
     ("Instagram URL", lambda b: b.instagram_url),
+    ("Website URL", lambda b: b.effective_website_url),
     ("Website Status", lambda b: b.website_status),
+    ("Resolution Status", lambda b: b.website_resolution_status),
+    ("Resolution Source", lambda b: b.website_resolution_source),
+    ("Resolution Confidence", lambda b: f"{b.website_resolution_confidence:.3f}"),
+    ("Resolution Evidence", lambda b: b.website_resolution_evidence),
+    ("Resolution Error", lambda b: b.website_resolution_error),
+    ("Lead Decision", lambda b: b.lead_decision),
+    ("Lead Decision Reason", lambda b: b.lead_decision_reason),
 ]
 
 
@@ -55,7 +63,15 @@ EXCEL_WIDTHS = {
     "A": 42,   # Business Name — пошире
     "B": 20,   # City — нормальная ширина
     "C": 40,   # Instagram URL — пошире
-    "D": 18,   # Website Status — пошире
+    "D": 45,   # Website URL
+    "E": 20,   # Website Status
+    "F": 22,   # Resolution Status
+    "G": 20,   # Resolution Source
+    "H": 22,   # Resolution Confidence
+    "I": 60,   # Resolution Evidence
+    "J": 36,   # Resolution Error
+    "K": 18,   # Lead Decision
+    "L": 34,   # Lead Decision Reason
 }
 
 
@@ -120,11 +136,17 @@ def format_leads_summary(businesses: List[Business], limit: int = 20) -> str:
 
     blocks = []
     for b in leads[:limit]:
+        website_line = (
+            f"\nWebsite: {b.effective_website_url}"
+            if b.effective_website_url
+            else ""
+        )
         blocks.append(
             f"Назва: {b.name}\n"
             f"Місто: {b.city}\n"
             f"Instagram: {b.instagram_url}\n"
             f"Статус сайту: {b.website_status}"
+            f"{website_line}"
         )
     text = "\n\n".join(blocks)
     if len(leads) > limit:
