@@ -1,0 +1,118 @@
+name: Lead Hunter CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - feature/lidogenerator-v2-integration
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lead-hunter-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      TELEGRAM_TOKEN: ""
+      ANTHROPIC_API_KEY: ""
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Run stage8 Telegram smoke test
+        run: python tests/stage8_bot.py
+
+      - name: Run isolated stage9 target and shortage test
+        shell: bash
+        run: |
+          python - <<'PY'
+          import gc
+          import os
+          import runpy
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          repo = Path.cwd().resolve()
+          script = repo / "tests" / "stage9_target_leads.py"
+
+          with tempfile.TemporaryDirectory(prefix="lidogenerator-stage9-") as temp_dir:
+              temp = Path(temp_dir)
+              old_cwd = Path.cwd()
+              os.environ["DB_PATH"] = str(temp / "stage9.db")
+              os.environ["EXPORT_DIR"] = str(temp / "exports")
+              sys.path.insert(0, str(repo))
+              try:
+                  os.chdir(temp)
+                  runpy.run_path(str(script), run_name="__main__")
+              finally:
+                  os.chdir(old_cwd)
+                  if sys.path and sys.path[0] == str(repo):
+                      sys.path.pop(0)
+                  gc.collect()
+          PY
+
+      - name: Compile Python sources
+        env:
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+        run: python -m compileall .
+
+      - name: Reject tracked runtime artifacts
+        shell: bash
+        run: |
+          python - <<'PY'
+          import subprocess
+
+          tracked = subprocess.check_output(
+              ["git", "ls-files"],
+              text=True,
+          ).splitlines()
+          forbidden = []
+
+          for path in tracked:
+              normalized = path.replace("\\", "/")
+              if (
+                  normalized == ".env"
+                  or normalized.endswith(".db")
+                  or normalized.startswith("exports/")
+                  or normalized.startswith("__pycache__/")
+                  or "/__pycache__/" in normalized
+                  or normalized.endswith(".pyc")
+                  or "STAGE_02B" in normalized
+                  or "art-studio-184" in normalized
+              ):
+                  forbidden.append(normalized)
+
+          if forbidden:
+              print("Forbidden tracked runtime artifacts:")
+              for path in forbidden:
+                  print(f"- {path}")
+              raise SystemExit(1)
+
+          print("No forbidden tracked runtime artifacts found.")
+          PY
