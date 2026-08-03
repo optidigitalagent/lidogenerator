@@ -25,6 +25,10 @@ from agents import collector, site_checker, social_checker, ai_scorer, reporter,
 from models import Business
 from website_candidate_matching import SearchProvider
 from website_pipeline import LeadDecision, ResolverMode, parse_resolver_mode, qualify_lead
+from website_search_runtime import (
+    build_configured_search_provider,
+    search_budget_snapshot,
+)
 from niche_catalog import resolve_niche_plan
 from query_budget import allocate_query_budget
 from query_planner import build_query_queue
@@ -143,6 +147,12 @@ async def run_search(
     interval = progress_interval if progress_interval is not None else config.PROGRESS_INTERVAL
     progress = _Progress(progress_callback, interval, stop_event)
     resolver_mode = parse_resolver_mode(config.WEBSITE_RESOLVER_MODE)
+    if website_search_provider is not None:
+        runtime_website_search_provider = website_search_provider
+    elif resolver_mode is ResolverMode.OFF:
+        runtime_website_search_provider = None
+    else:
+        runtime_website_search_provider = build_configured_search_provider()
     stop_flag = (lambda: stop_event.is_set()) if stop_event else None
 
     # Накопители по ходу батчевого сбора
@@ -197,8 +207,17 @@ async def run_search(
         added_bad_site = sum(1 for b in leads if b.website_status == "bad website")
         return added_no_site, added_bad_site
 
+    async def _update_website_search_budget_progress() -> None:
+        snapshot = search_budget_snapshot(runtime_website_search_provider)
+        if snapshot is not None:
+            await progress.update(
+                "website_search",
+                f"Пошуків офіційного сайту: {snapshot.used_requests}/{snapshot.max_requests}",
+            )
+
     async def _send_progress(force: bool = False):
         added_no_site, added_bad_site = _added_counts()
+        await _update_website_search_budget_progress()
         await progress.update(
             "main",
             f"🔎 Шукаю {target_leads} якісних лідів: «{niche}» у місті {city}\n"
@@ -299,7 +318,7 @@ async def run_search(
                     if resolver_mode is not ResolverMode.OFF:
                         await website_resolver.resolve_business_websites(
                             unique_batch,
-                            provider=website_search_provider,
+                            provider=runtime_website_search_provider,
                         )
                     # Проверяем сайты у уникальных бизнесов батча (быстро, параллельно)
                     await site_checker.check_sites(unique_batch)
@@ -409,6 +428,7 @@ async def run_search(
 
         # --- Финальный отчёт ---
         added_no_site, added_bad_site = _added_counts()
+        await _update_website_search_budget_progress()
         shortage = ""
         if len(leads) < target_leads:
             shortage = (
