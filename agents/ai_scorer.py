@@ -8,6 +8,7 @@ lead pipeline can continue.
 """
 
 import json
+from collections.abc import Mapping
 from typing import Awaitable, Callable, List, Optional
 
 import config
@@ -18,6 +19,8 @@ ProgressCallback = Callable[[int, int], Awaitable[None]]
 FALLBACK_SCORE = 50
 FALLBACK_PRIORITY = "warm"
 INVALID_RESPONSE_REASON = "AI вернул некорректный ответ"
+EMPTY_RESPONSE_REASON = "AI вернул пустой ответ"
+SCORING_UNAVAILABLE_PREFIX = "AI-скоринг недоступен: "
 
 SCORING_SCHEMA = {
     "type": "object",
@@ -118,6 +121,52 @@ def _parse_response(text: object) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
+def _field(value: object, name: str) -> object:
+    """Read one public SDK response field without serializing the object."""
+    if isinstance(value, Mapping):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _contains_refusal(response: object) -> bool:
+    """Detect refusal content without reading or retaining its text."""
+    output = _field(response, "output")
+    if not isinstance(output, (list, tuple)):
+        return False
+    for item in output:
+        if _field(item, "type") == "refusal":
+            return True
+        content = _field(item, "content")
+        if not isinstance(content, (list, tuple)):
+            continue
+        if any(_field(part, "type") == "refusal" for part in content):
+            return True
+    return False
+
+
+def _response_failure_reason(response: object) -> Optional[str]:
+    """Return a safe response category before output text is parsed."""
+    status = _field(response, "status")
+    if status == "incomplete":
+        incomplete_details = _field(response, "incomplete_details")
+        reason = _field(incomplete_details, "reason")
+        if isinstance(reason, str) and (
+            "max_output_tokens" in reason.casefold()
+            or "max_tokens" in reason.casefold()
+        ):
+            return f"{SCORING_UNAVAILABLE_PREFIX}output_limit"
+        return f"{SCORING_UNAVAILABLE_PREFIX}incomplete_response"
+    if status == "failed":
+        return f"{SCORING_UNAVAILABLE_PREFIX}response_failed"
+    if _contains_refusal(response):
+        return f"{SCORING_UNAVAILABLE_PREFIX}refusal"
+
+    output_text = _field(response, "output_text")
+    if not isinstance(output_text, str) or not output_text.strip():
+        return EMPTY_RESPONSE_REASON
+    return None
+
+
 def _validated_result(data: object) -> Optional[tuple[int, str, str]]:
     """Validate the structured result again before it reaches the pipeline."""
     if not isinstance(data, dict) or set(data) != {"score", "priority", "reason"}:
@@ -160,11 +209,18 @@ async def _score_one(client, business: Business) -> None:
             instructions=SCORING_INSTRUCTIONS,
             input=_prompt_for_business(business),
             max_output_tokens=config.OPENAI_SCORING_MAX_OUTPUT_TOKENS,
+            reasoning={
+                "effort": config.OPENAI_SCORING_REASONING_EFFORT,
+            },
             text=SCORING_TEXT_FORMAT,
             tools=[],
             store=False,
         )
-        output_text = getattr(response, "output_text", None)
+        failure_reason = _response_failure_reason(response)
+        if failure_reason is not None:
+            _fallback(business, failure_reason)
+            return
+        output_text = _field(response, "output_text")
         validated = _validated_result(_parse_response(output_text))
         if validated is None:
             _fallback(business, INVALID_RESPONSE_REASON)

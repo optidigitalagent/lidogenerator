@@ -60,6 +60,8 @@ async def _validate() -> int:
     print(f"priority={business.ai_priority}")
     print(f"reason={business.ai_reason[:200]}")
     print(f"model={config.OPENAI_MODEL}")
+    print(f"reasoning_effort={config.OPENAI_SCORING_REASONING_EFFORT}")
+    print(f"max_output_tokens={config.OPENAI_SCORING_MAX_OUTPUT_TOKENS}")
     print(f"result={'fallback' if fallback else 'success'}")
     return 1 if fallback else 0
 

@@ -22,6 +22,7 @@ OPENAI_ENV_NAMES = (
     "OPENAI_API_KEY",
     "OPENAI_MODEL",
     "OPENAI_SCORING_ENABLED",
+    "OPENAI_SCORING_REASONING_EFFORT",
     "OPENAI_SCORING_MAX_OUTPUT_TOKENS",
     "OPENAI_SCORING_TIMEOUT_SECONDS",
 )
@@ -47,6 +48,7 @@ print(json.dumps({
     "key": config.OPENAI_API_KEY,
     "model": config.OPENAI_MODEL,
     "enabled": config.OPENAI_SCORING_ENABLED,
+    "reasoning": config.OPENAI_SCORING_REASONING_EFFORT,
     "tokens": config.OPENAI_SCORING_MAX_OUTPUT_TOKENS,
     "timeout": config.OPENAI_SCORING_TIMEOUT_SECONDS,
 }))
@@ -72,7 +74,8 @@ class ConfigTests(unittest.TestCase):
                 "key": "",
                 "model": "gpt-5-nano",
                 "enabled": "false",
-                "tokens": 256,
+                "reasoning": "minimal",
+                "tokens": 512,
                 "timeout": 20.0,
             },
         )
@@ -93,6 +96,27 @@ class ConfigTests(unittest.TestCase):
         result = _run_isolated_config({"OPENAI_MODEL": "  test-model  "})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["model"], "test-model")
+
+    def test_reasoning_effort_allowed_values_are_normalized(self):
+        for value in ("minimal", " low ", "MEDIUM", "High"):
+            with self.subTest(value=value):
+                result = _run_isolated_config(
+                    {"OPENAI_SCORING_REASONING_EFFORT": value}
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    json.loads(result.stdout)["reasoning"],
+                    value.strip().casefold(),
+                )
+
+    def test_invalid_reasoning_effort_is_rejected(self):
+        for value in ("none", "", "xhigh", "arbitrary"):
+            with self.subTest(value=value):
+                result = _run_isolated_config(
+                    {"OPENAI_SCORING_REASONING_EFFORT": value}
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("OPENAI_SCORING_REASONING_EFFORT", result.stderr)
 
     def test_output_token_bounds_and_strict_integer(self):
         for value in ("64", "1024"):
@@ -133,7 +157,36 @@ class _FakeResponses:
         item = self._queue.pop(0)
         if isinstance(item, BaseException):
             raise item
-        return types.SimpleNamespace(output_text=item)
+        if isinstance(item, str) or item is None:
+            return types.SimpleNamespace(
+                status="completed",
+                incomplete_details=None,
+                output=[],
+                output_text=item,
+            )
+        return item
+
+
+def _response(
+    *,
+    status="completed",
+    output_text=None,
+    incomplete_reason=None,
+    output=None,
+    **private_fields,
+):
+    incomplete_details = (
+        types.SimpleNamespace(reason=incomplete_reason)
+        if incomplete_reason is not None
+        else None
+    )
+    return types.SimpleNamespace(
+        status=status,
+        incomplete_details=incomplete_details,
+        output=output or [],
+        output_text=output_text,
+        **private_fields,
+    )
 
 
 def _fake_openai_module(queue):
@@ -158,7 +211,8 @@ class OpenAIScorerTests(unittest.IsolatedAsyncioTestCase):
             OPENAI_SCORING_ENABLED=enabled,
             OPENAI_API_KEY=key,
             OPENAI_MODEL="gpt-5-nano",
-            OPENAI_SCORING_MAX_OUTPUT_TOKENS=256,
+            OPENAI_SCORING_REASONING_EFFORT="minimal",
+            OPENAI_SCORING_MAX_OUTPUT_TOKENS=512,
             OPENAI_SCORING_TIMEOUT_SECONDS=20.0,
         )
 
@@ -234,8 +288,11 @@ class OpenAIScorerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(request_calls), 1)
         request = request_calls[0]
         self.assertEqual(request["model"], "gpt-5-nano")
-        self.assertEqual(request["max_output_tokens"], 256)
+        self.assertEqual(request["max_output_tokens"], 512)
+        self.assertEqual(request["reasoning"], {"effort": "minimal"})
+        self.assertNotIn("summary", request["reasoning"])
         self.assertEqual(request["tools"], [])
+        self.assertNotIn("web_search", request)
         self.assertFalse(request["store"])
         self.assertEqual(request["text"], ai_scorer.SCORING_TEXT_FORMAT)
         self.assertEqual(
@@ -267,9 +324,109 @@ class OpenAIScorerTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertNotIn(private_value, prompt)
 
+    async def test_configured_reasoning_effort_is_passed(self):
+        payload = json.dumps(
+            {"score": 55, "priority": "warm", "reason": "Qualified"}
+        )
+        module, _, request_calls = _fake_openai_module([payload])
+        with self._config_patch(), patch.object(
+            ai_scorer.config,
+            "OPENAI_SCORING_REASONING_EFFORT",
+            "low",
+        ), patch.dict(sys.modules, {"openai": module}):
+            await ai_scorer.score_businesses([Business()])
+        self.assertEqual(request_calls[0]["reasoning"], {"effort": "low"})
+
+    async def test_incomplete_output_limits_use_safe_fallback(self):
+        for incomplete_reason in ("max_output_tokens", "max_tokens"):
+            with self.subTest(incomplete_reason=incomplete_reason):
+                response = _response(
+                    status="incomplete",
+                    incomplete_reason=f"{incomplete_reason}: SECRET_DETAIL",
+                    id="SECRET_RESPONSE_ID",
+                    usage={"SECRET_USAGE": 42},
+                )
+                module, _, _ = _fake_openai_module([response])
+                business = Business()
+                with self._config_patch(), patch.dict(
+                    sys.modules, {"openai": module}
+                ):
+                    await ai_scorer.score_businesses([business])
+                self.assertEqual(
+                    business.ai_reason,
+                    "AI-скоринг недоступен: output_limit",
+                )
+                for private_value in (
+                    "SECRET_DETAIL",
+                    "SECRET_RESPONSE_ID",
+                    "SECRET_USAGE",
+                ):
+                    self.assertNotIn(private_value, business.ai_reason)
+
+    async def test_other_incomplete_response_uses_safe_fallback(self):
+        response = _response(
+            status="incomplete",
+            incomplete_reason="content_filter: SECRET_DETAIL",
+        )
+        module, _, _ = _fake_openai_module([response])
+        business = Business()
+        with self._config_patch(), patch.dict(sys.modules, {"openai": module}):
+            await ai_scorer.score_businesses([business])
+        self.assertEqual(
+            business.ai_reason,
+            "AI-скоринг недоступен: incomplete_response",
+        )
+        self.assertNotIn("SECRET_DETAIL", business.ai_reason)
+
+    async def test_failed_response_uses_safe_fallback(self):
+        response = _response(
+            status="failed",
+            output_text="SECRET_RAW_OUTPUT",
+            id="SECRET_RESPONSE_ID",
+        )
+        module, _, _ = _fake_openai_module([response])
+        business = Business()
+        with self._config_patch(), patch.dict(sys.modules, {"openai": module}):
+            await ai_scorer.score_businesses([business])
+        self.assertEqual(
+            business.ai_reason,
+            "AI-скоринг недоступен: response_failed",
+        )
+        self.assertNotIn("SECRET", business.ai_reason)
+
+    async def test_completed_empty_response_has_distinct_fallback(self):
+        module, _, _ = _fake_openai_module(["   "])
+        business = Business()
+        with self._config_patch(), patch.dict(sys.modules, {"openai": module}):
+            await ai_scorer.score_businesses([business])
+        self.assertEqual(business.ai_reason, "AI вернул пустой ответ")
+
+    async def test_refusal_uses_safe_fallback_without_refusal_text(self):
+        response = _response(
+            status="completed",
+            output=[
+                types.SimpleNamespace(
+                    type="message",
+                    content=[
+                        types.SimpleNamespace(
+                            type="refusal",
+                            refusal="SECRET_REFUSAL_TEXT",
+                        )
+                    ],
+                )
+            ],
+            id="SECRET_RESPONSE_ID",
+            usage={"SECRET_USAGE": 42},
+        )
+        module, _, _ = _fake_openai_module([response])
+        business = Business()
+        with self._config_patch(), patch.dict(sys.modules, {"openai": module}):
+            await ai_scorer.score_businesses([business])
+        self.assertEqual(business.ai_reason, "AI-скоринг недоступен: refusal")
+        self.assertNotIn("SECRET", business.ai_reason)
+
     async def test_invalid_structured_outputs_fall_back(self):
         invalid_payloads = (
-            "",
             "prefix {\"score\": 80, \"priority\": \"hot\", \"reason\": \"x\"}",
             json.dumps([{"score": 80, "priority": "hot", "reason": "x"}]),
             json.dumps({"score": True, "priority": "hot", "reason": "x"}),
@@ -346,6 +503,26 @@ class OpenAIScorerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(businesses[1].ai_score, 39)
         self.assertEqual(businesses[1].ai_priority, "cold")
         self.assertEqual(progress, [(1, 2), (2, 2)])
+
+    async def test_one_incomplete_response_does_not_stop_the_next(self):
+        incomplete = _response(
+            status="incomplete",
+            incomplete_reason="max_output_tokens",
+        )
+        success = json.dumps(
+            {"score": 39, "priority": "cold", "reason": "Second succeeded"}
+        )
+        module, _, request_calls = _fake_openai_module([incomplete, success])
+        businesses = [Business(name="First"), Business(name="Second")]
+        with self._config_patch(), patch.dict(sys.modules, {"openai": module}):
+            await ai_scorer.score_businesses(businesses)
+        self.assertEqual(len(request_calls), 2)
+        self.assertEqual(
+            businesses[0].ai_reason,
+            "AI-скоринг недоступен: output_limit",
+        )
+        self.assertEqual(businesses[1].ai_score, 39)
+        self.assertEqual(businesses[1].ai_priority, "cold")
 
     async def test_sdk_import_or_client_failure_is_fail_open(self):
         module = types.ModuleType("openai")

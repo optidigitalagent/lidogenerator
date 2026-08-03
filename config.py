@@ -123,9 +123,17 @@ MAX_WEBSITE_SEARCH_REQUESTS_PER_TASK = _environment_integer(
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano").strip()
 OPENAI_SCORING_ENABLED = _environment_boolean("OPENAI_SCORING_ENABLED", "false")
+OPENAI_SCORING_REASONING_EFFORT = os.getenv(
+    "OPENAI_SCORING_REASONING_EFFORT",
+    "minimal",
+).strip().casefold()
+if OPENAI_SCORING_REASONING_EFFORT not in {"minimal", "low", "medium", "high"}:
+    raise ValueError(
+        "OPENAI_SCORING_REASONING_EFFORT must be one of: minimal, low, medium, high"
+    )
 OPENAI_SCORING_MAX_OUTPUT_TOKENS = _environment_integer(
     "OPENAI_SCORING_MAX_OUTPUT_TOKENS",
-    "256",
+    "512",
     64,
     1024,
 )
