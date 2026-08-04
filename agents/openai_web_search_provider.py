@@ -39,8 +39,22 @@ OPENAI_WEB_SEARCH_SCHEMA = {
                     "url": {"type": "string"},
                     "title": {"type": "string"},
                     "snippet": {"type": "string"},
+                    "name_matches": {"type": "boolean"},
+                    "city_matches": {"type": "boolean"},
+                    "address_matches": {"type": "boolean"},
+                    "phone_matches": {"type": "boolean"},
+                    "different_city_detected": {"type": "boolean"},
                 },
-                "required": ["url", "title", "snippet"],
+                "required": [
+                    "url",
+                    "title",
+                    "snippet",
+                    "name_matches",
+                    "city_matches",
+                    "address_matches",
+                    "phone_matches",
+                    "different_city_detected",
+                ],
                 "additionalProperties": False,
             },
         },
@@ -146,8 +160,14 @@ class OpenAIWebSearchTelemetry:
     requests_succeeded: int
     requests_failed: int
     tool_calls_seen: int
+    search_actions_seen: int
+    open_page_actions_seen: int
+    find_in_page_actions_seen: int
+    unknown_actions_seen: int
     sources_seen: int
+    identity_candidates_rejected: int
     candidates_returned: int
+    tool_call_limit_exceeded: bool
     last_error_category: str | None = None
 
 
@@ -169,24 +189,38 @@ def build_openai_web_search_input(request: SearchRequest) -> str:
 
     if not isinstance(request, SearchRequest):
         raise TypeError("request must be a SearchRequest")
+    name = _bounded_value(request.business_name, 100)
+    city = _bounded_value(request.city, 80)
+    address = _bounded_value(request.address, 120) if request.address is not None else None
     identity_lines = [
-        f"Business name: {_bounded_value(request.business_name, 400)}",
-        f"City: {_bounded_value(request.city, 250)}",
+        f"Business name: {name}",
+        f"City: {city}",
     ]
-    if request.address is not None:
-        identity_lines.append(f"Address: {_bounded_value(request.address, 400)}")
+    if address is not None:
+        identity_lines.append(f"Address: {address}")
     if request.phone is not None:
-        identity_lines.append(f"Phone: {_bounded_value(request.phone, 64)}")
+        identity_lines.append(f"Phone: {_bounded_value(request.phone, 32)}")
     identity_lines.append(f"Maximum candidates: {request.max_results}")
+    query_variants = [
+        f'1. "{name}" "{city}"' + (f' "{address}"' if address else ""),
+        f'2. "{name}" "{city}"',
+    ]
+    if address is not None:
+        query_variants.append(f'3. "{address}" "{name}"')
     instructions = (
-        "Search for the official website of exactly this business. Return only "
-        "business-owned website candidates. Do not return Instagram, Facebook, "
-        "TikTok, YouTube, Google Maps, directories, aggregators, marketplaces, "
-        "booking platforms, review sites, link-in-bio pages, or news. Never invent "
-        "a URL. If there are no confident candidates, return an empty results array. "
-        "Keep title and snippet concise and limited to identity matching. Do not "
-        "make a final official-site determination; the deterministic matcher will "
-        "perform final qualification."
+        "All identity fields describe one exact business. A same-name business in "
+        "any other city is not a candidate. City must match exactly in meaning. "
+        "When an address is supplied, source evidence must match that address. Do "
+        "not infer ownership from the name alone. If source evidence supports Kyiv "
+        f"or any city other than {city}, reject it. If exact city/address evidence "
+        "is absent, return an empty results array; do not return a best guess. "
+        "Perform one search action only. Do not use open_page or find_in_page. Put "
+        "multiple focused queries into that one search action if needed. Return only "
+        "business-owned websites; exclude social media, Maps, directories, "
+        "aggregators, marketplaces, booking/review/link-in-bio/news pages. Never "
+        "invent a URL. Set every identity boolean only from source evidence. The "
+        "deterministic matcher remains final authority.\n\nSuggested query variants:\n"
+        + "\n".join(query_variants)
     )
     prompt = "\n".join(identity_lines) + "\n\n" + instructions
     return prompt[:_INPUT_LIMIT].rstrip()
@@ -293,7 +327,26 @@ def _mapped_sdk_error(exc: BaseException) -> tuple[SearchProviderError, str]:
     return SearchProviderError("OpenAI web search request failed"), category
 
 
-def _validated_payload(output_text: object) -> list[dict[str, str]]:
+_RESULT_KEYS = frozenset({
+    "url",
+    "title",
+    "snippet",
+    "name_matches",
+    "city_matches",
+    "address_matches",
+    "phone_matches",
+    "different_city_detected",
+})
+_IDENTITY_BOOLEAN_KEYS = (
+    "name_matches",
+    "city_matches",
+    "address_matches",
+    "phone_matches",
+    "different_city_detected",
+)
+
+
+def _validated_payload(output_text: object) -> list[dict[str, object]]:
     if not isinstance(output_text, str) or not output_text.strip():
         raise SearchProviderError("OpenAI web search returned empty output")
     try:
@@ -305,16 +358,33 @@ def _validated_payload(output_text: object) -> list[dict[str, str]]:
     items = payload["results"]
     if not isinstance(items, list):
         raise SearchProviderError("invalid OpenAI web search response")
-    validated: list[dict[str, str]] = []
+    validated: list[dict[str, object]] = []
     for item in items:
         if (
             not isinstance(item, dict)
-            or set(item) != {"url", "title", "snippet"}
+            or set(item) != _RESULT_KEYS
             or not all(isinstance(item[key], str) for key in ("url", "title", "snippet"))
+            or not all(type(item[key]) is bool for key in _IDENTITY_BOOLEAN_KEYS)
         ):
             raise SearchProviderError("invalid OpenAI web search response")
         validated.append(item)
     return validated
+
+
+def _identity_prefilter_allows(item: Mapping[str, object], request: SearchRequest) -> bool:
+    if (
+        item["name_matches"] is not True
+        or item["city_matches"] is not True
+        or item["different_city_detected"] is not False
+    ):
+        return False
+    if request.address is not None:
+        return item["address_matches"] is True or (
+            request.phone is not None and item["phone_matches"] is True
+        )
+    if request.phone is not None:
+        return item["phone_matches"] is True
+    return True
 
 
 class OpenAIWebSearchProvider(SearchProvider):
@@ -339,8 +409,14 @@ class OpenAIWebSearchProvider(SearchProvider):
         self._requests_succeeded = 0
         self._requests_failed = 0
         self._tool_calls_seen = 0
+        self._search_actions_seen = 0
+        self._open_page_actions_seen = 0
+        self._find_in_page_actions_seen = 0
+        self._unknown_actions_seen = 0
         self._sources_seen = 0
+        self._identity_candidates_rejected = 0
         self._candidates_returned = 0
+        self._tool_call_limit_exceeded = False
         self._last_error_category: str | None = None
 
     @property
@@ -353,8 +429,14 @@ class OpenAIWebSearchProvider(SearchProvider):
             requests_succeeded=self._requests_succeeded,
             requests_failed=self._requests_failed,
             tool_calls_seen=self._tool_calls_seen,
+            search_actions_seen=self._search_actions_seen,
+            open_page_actions_seen=self._open_page_actions_seen,
+            find_in_page_actions_seen=self._find_in_page_actions_seen,
+            unknown_actions_seen=self._unknown_actions_seen,
             sources_seen=self._sources_seen,
+            identity_candidates_rejected=self._identity_candidates_rejected,
             candidates_returned=self._candidates_returned,
+            tool_call_limit_exceeded=self._tool_call_limit_exceeded,
             last_error_category=self._last_error_category,
         )
 
@@ -380,7 +462,6 @@ class OpenAIWebSearchProvider(SearchProvider):
         if status != "completed":
             raise SearchProviderError("OpenAI web search response incomplete")
 
-        items = _validated_payload(_field(response, "output_text"))
         output = _field(response, "output")
         output_items = output if isinstance(output, (list, tuple)) else ()
         source_urls: list[str] = []
@@ -392,6 +473,18 @@ class OpenAIWebSearchProvider(SearchProvider):
                 continue
             tool_calls += 1
             action = _field(item, "action")
+            action_type = _field(action, "type")
+            if action_type == "search":
+                self._search_actions_seen += 1
+            elif action_type == "open_page":
+                self._open_page_actions_seen += 1
+                continue
+            elif action_type == "find_in_page":
+                self._find_in_page_actions_seen += 1
+                continue
+            else:
+                self._unknown_actions_seen += 1
+                continue
             sources = _field(action, "sources")
             if not isinstance(sources, (list, tuple)):
                 continue
@@ -409,15 +502,26 @@ class OpenAIWebSearchProvider(SearchProvider):
                     source_urls.append(normalized)
         self._tool_calls_seen += tool_calls
         self._sources_seen += sources_seen
+        if tool_calls > 1:
+            self._tool_call_limit_exceeded = True
+            self._last_error_category = "tool_call_limit"
+            raise SearchProviderError("OpenAI web search exceeded tool call limit")
         if tool_calls == 0:
             raise SearchProviderError("OpenAI web search tool was not called")
-        if items and not source_urls:
+        items = _validated_payload(_field(response, "output_text"))
+        eligible_items: list[dict[str, object]] = []
+        for item in items:
+            if _identity_prefilter_allows(item, request):
+                eligible_items.append(item)
+            else:
+                self._identity_candidates_rejected += 1
+        if eligible_items and not source_urls:
             raise SearchProviderError("OpenAI web search returned unverified candidates")
 
         count = min(request.max_results, self._settings.max_results)
         results: list[SearchResult] = []
         seen_candidates: set[str] = set()
-        for item in items:
+        for item in eligible_items:
             try:
                 normalized_url = normalize_candidate_url(item["url"])
             except (TypeError, ValueError):
@@ -470,11 +574,13 @@ class OpenAIWebSearchProvider(SearchProvider):
             self._last_error_category = category
             raise mapped from None
 
+        self._last_error_category = None
         try:
             results = self._process_response(response, request)
         except SearchProviderError:
             self._requests_failed += 1
-            self._last_error_category = "response_error"
+            if self._last_error_category != "tool_call_limit":
+                self._last_error_category = "response_error"
             raise
         self._requests_succeeded += 1
         self._candidates_returned += len(results)

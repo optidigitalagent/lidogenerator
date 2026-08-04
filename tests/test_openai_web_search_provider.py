@@ -56,10 +56,15 @@ def _response(*, status="completed", output_text=None, output=(), reason=None):
     )
 
 
-def _tool_call(*urls):
+def _tool_call(*urls, action_type="search", **action_fields):
+    action = {
+        "type": action_type,
+        "sources": [{"url": url} for url in urls],
+    }
+    action.update(action_fields)
     return {
         "type": "web_search_call",
-        "action": {"sources": [{"url": url} for url in urls]},
+        "action": action,
     }
 
 
@@ -67,8 +72,19 @@ def _payload(*items):
     return json.dumps({"results": list(items)})
 
 
-def _item(url, title="Title", snippet="Snippet"):
-    return {"url": url, "title": title, "snippet": snippet}
+def _item(url, title="Title", snippet="Snippet", **identity):
+    item = {
+        "url": url,
+        "title": title,
+        "snippet": snippet,
+        "name_matches": True,
+        "city_matches": True,
+        "address_matches": True,
+        "phone_matches": False,
+        "different_city_detected": False,
+    }
+    item.update(identity)
+    return item
 
 
 class _FakeResponses:
@@ -179,6 +195,14 @@ class InputBuilderTests(unittest.TestCase):
         for expected in ("Business name: Business", "City: City", "Address: Address", "Phone: 380671234567", "Maximum candidates: 3"):
             self.assertIn(expected, first)
         self.assertIn("empty results array", first)
+        self.assertIn("same-name business", first)
+        self.assertIn("City must match exactly", first)
+        self.assertIn("source evidence must match that address", first)
+        self.assertIn("one search action only", first)
+        self.assertIn("Do not use open_page or find_in_page", first)
+        self.assertLessEqual(first.count('\n1. '), 1)
+        self.assertLessEqual(first.count('\n2. '), 1)
+        self.assertLessEqual(first.count('\n3. '), 1)
         self.assertNotIn("API key", first)
         self.assertNotIn("evidence JSON", first)
 
@@ -198,6 +222,12 @@ class InputBuilderTests(unittest.TestCase):
         self.assertNotIn("\x1f", prompt)
         self.assertIn("Business name: N", prompt)
         self.assertIn("City: C", prompt)
+        self.assertIn("Perform one search action only", prompt)
+        self.assertIn("Suggested query variants:", prompt)
+        self.assertLessEqual(
+            sum(line[:3] in {"1. ", "2. ", "3. "} for line in prompt.splitlines()),
+            3,
+        )
 
 
 class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
@@ -284,8 +314,14 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.telemetry().requests_succeeded, 1)
         self.assertEqual(provider.telemetry().requests_failed, 0)
         self.assertEqual(provider.telemetry().tool_calls_seen, 1)
+        self.assertEqual(provider.telemetry().search_actions_seen, 1)
+        self.assertEqual(provider.telemetry().open_page_actions_seen, 0)
+        self.assertEqual(provider.telemetry().find_in_page_actions_seen, 0)
+        self.assertEqual(provider.telemetry().unknown_actions_seen, 0)
         self.assertEqual(provider.telemetry().sources_seen, 3)
+        self.assertEqual(provider.telemetry().identity_candidates_rejected, 0)
         self.assertEqual(provider.telemetry().candidates_returned, 2)
+        self.assertFalse(provider.telemetry().tool_call_limit_exceeded)
         self.assertIsNone(provider.telemetry().last_error_category)
 
     async def test_unsourced_and_unsafe_candidates_are_silently_rejected(self):
@@ -321,6 +357,127 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await provider.search(REQUEST), ())
         self.assertEqual(provider.telemetry().requests_succeeded, 1)
 
+    async def test_identity_prefilter_rejects_wrong_or_uncorroborated_candidates(self):
+        cases = (
+            ({"city_matches": False}, REQUEST),
+            ({"different_city_detected": True}, REQUEST),
+            ({"address_matches": False}, REQUEST),
+            ({"name_matches": False}, REQUEST),
+            ({"phone_matches": False}, SearchRequest("Name", "City", phone="+380671234567")),
+        )
+        for flags, request in cases:
+            with self.subTest(flags=flags):
+                item = _item("https://rejected.example/", **flags)
+                response = _response(
+                    output_text=_payload(item),
+                    output=(_tool_call("https://rejected.example/"),),
+                )
+                provider, _ = _provider(response)
+                self.assertEqual(await provider.search(request), ())
+                telemetry = provider.telemetry()
+                self.assertEqual(telemetry.identity_candidates_rejected, 1)
+                self.assertFalse(hasattr(telemetry, "rejected_url"))
+
+        rejected_without_sources, _ = _provider(_response(
+            output_text=_payload(_item(
+                "https://wrong-city.example/",
+                city_matches=False,
+                different_city_detected=True,
+            )),
+            output=(_tool_call(),),
+        ))
+        self.assertEqual(await rejected_without_sources.search(REQUEST), ())
+        self.assertEqual(
+            rejected_without_sources.telemetry().identity_candidates_rejected,
+            1,
+        )
+
+    async def test_phone_corroborates_only_when_request_supplies_phone(self):
+        with_phone = SearchRequest(
+            "Name", "City", "Address", "+380671234567"
+        )
+        item = _item(
+            "https://phone.example/",
+            address_matches=False,
+            phone_matches=True,
+        )
+        accepted, _ = _provider(_response(
+            output_text=_payload(item),
+            output=(_tool_call("https://phone.example/"),),
+        ))
+        self.assertEqual(
+            tuple(result.url for result in await accepted.search(with_phone)),
+            ("https://phone.example/",),
+        )
+
+        without_phone, _ = _provider(_response(
+            output_text=_payload(item),
+            output=(_tool_call("https://phone.example/"),),
+        ))
+        self.assertEqual(await without_phone.search(REQUEST), ())
+        self.assertEqual(without_phone.telemetry().identity_candidates_rejected, 1)
+
+    async def test_action_accounting_and_only_search_sources_are_eligible(self):
+        cases = (
+            ("open_page", "open_page_actions_seen"),
+            ("find_in_page", "find_in_page_actions_seen"),
+            ("future_action", "unknown_actions_seen"),
+            (None, "unknown_actions_seen"),
+        )
+        for action_type, counter in cases:
+            with self.subTest(action_type=action_type):
+                response = _response(
+                    output_text=_payload(),
+                    output=(_tool_call(
+                        "https://not-a-search-source.example/",
+                        action_type=action_type,
+                        url="https://private-action-url.example/",
+                        pattern="SECRET_PATTERN",
+                    ),),
+                )
+                provider, _ = _provider(response)
+                self.assertEqual(await provider.search(REQUEST), ())
+                telemetry = provider.telemetry()
+                self.assertEqual(getattr(telemetry, counter), 1)
+                self.assertEqual(telemetry.sources_seen, 0)
+
+        response = _response(
+            output_text=_payload(_item("https://opened.example/")),
+            output=(_tool_call(
+                "https://opened.example/",
+                action_type="open_page",
+                url="https://opened.example/",
+            ),),
+        )
+        provider, _ = _provider(response)
+        with self.assertRaisesRegex(SearchProviderError, "unverified candidates"):
+            await provider.search(REQUEST)
+
+    async def test_multiple_tool_call_items_fail_closed_with_safe_telemetry(self):
+        response = _response(
+            output_text=_payload(_item("https://verified.example/")),
+            output=(
+                _tool_call("https://verified.example/"),
+                _tool_call(action_type="open_page", url="https://verified.example/"),
+            ),
+        )
+        provider, _ = _provider(response)
+        with self.assertRaisesRegex(
+            SearchProviderError,
+            "OpenAI web search exceeded tool call limit",
+        ):
+            await provider.search(REQUEST)
+        telemetry = provider.telemetry()
+        self.assertEqual(telemetry.requests_started, 1)
+        self.assertEqual(telemetry.requests_succeeded, 0)
+        self.assertEqual(telemetry.requests_failed, 1)
+        self.assertEqual(telemetry.tool_calls_seen, 2)
+        self.assertEqual(telemetry.search_actions_seen, 1)
+        self.assertEqual(telemetry.open_page_actions_seen, 1)
+        self.assertTrue(telemetry.tool_call_limit_exceeded)
+        self.assertEqual(telemetry.last_error_category, "tool_call_limit")
+        self.assertEqual(telemetry.candidates_returned, 0)
+
     async def test_no_tool_call_and_unverified_claims_are_errors(self):
         cases = (
             (_response(output_text=_payload(), output=()), "tool was not called"),
@@ -341,6 +498,8 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
             (json.dumps({"results": {}, "extra": 1}), "invalid OpenAI"),
             (_payload({"url": "https://example.com", "title": "missing"}), "invalid OpenAI"),
             (_payload({"url": 1, "title": "x", "snippet": "y"}), "invalid OpenAI"),
+            (_payload(_item("https://example.com", city_matches=1)), "invalid OpenAI"),
+            (_payload({**_item("https://example.com"), "extra": False}), "invalid OpenAI"),
         )
         for output_text, message in malformed:
             with self.subTest(output_text=output_text):
@@ -526,6 +685,22 @@ print(json.dumps({
 
 
 class ValidationScriptTests(unittest.IsolatedAsyncioTestCase):
+    def test_utf8_console_configuration_uses_safe_reconfigure(self):
+        class Stream:
+            def __init__(self):
+                self.calls = []
+
+            def reconfigure(self, **kwargs):
+                self.calls.append(kwargs)
+
+        stdout = Stream()
+        stderr = Stream()
+        fake_sys = types.SimpleNamespace(stdout=stdout, stderr=stderr)
+        with patch.object(validate_openai_web_search, "sys", fake_sys):
+            validate_openai_web_search._configure_utf8_console()
+        self.assertEqual(stdout.calls, [{"encoding": "utf-8", "errors": "replace"}])
+        self.assertEqual(stderr.calls, [{"encoding": "utf-8", "errors": "replace"}])
+
     async def test_no_gate_and_bad_environment_make_no_request(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(runtime, "build_configured_search_provider") as factory:
             output = io.StringIO()
@@ -589,13 +764,110 @@ class ValidationScriptTests(unittest.IsolatedAsyncioTestCase):
         text = output.getvalue()
         self.assertEqual(result, 0)
         self.assertEqual(len(client.responses.calls), 1)
-        for expected in ("provider=openai", "request_budget_used=1", "requests_started=1", "tool_calls_seen=1", "result_count=1", "normalized_result_domains=status-dent.zp.ua", "expected_domain_found=yes", "final_result=success"):
+        for expected in (
+            "provider=openai",
+            "request_budget_used=1",
+            "requests_started=1",
+            "tool_calls_seen=1",
+            "search_actions_seen=1",
+            "open_page_actions_seen=0",
+            "find_in_page_actions_seen=0",
+            "unknown_actions_seen=0",
+            "identity_candidates_rejected=0",
+            "tool_call_limit_exceeded=no",
+            "resolution_status=uncertain",
+            "resolved_domain=",
+            "wrong_same_name_domain_returned=no",
+            "wrong_same_name_domain_promoted=no",
+            "final_result=success_expected_domain_found",
+        ):
             self.assertIn(expected, text)
-        for private in ("SECRET_API_KEY", "SECRET_SNIPPET", "вул. Поштова", "https://"):
+        for private in (
+            "SECRET_API_KEY", "SECRET_SNIPPET", "вул. Поштова", "https://",
+            "STATUS стоматологія", "STATUS СЃС‚РѕРјР°С‚РѕР»РѕРі",
+        ):
             self.assertNotIn(private, text)
-        title_lines = [line for line in text.splitlines() if line.startswith("title=")]
-        self.assertTrue(title_lines)
-        self.assertLessEqual(len(title_lines[0].removeprefix("title=")), 100)
+
+    async def test_wrong_kyiv_candidate_is_not_promoted_and_is_safe_success(self):
+        response = _response(
+            output_text=_payload(_item(
+                "https://status-dental-clinic.com.ua/",
+                "STATUS стоматологія — Київ",
+                "Стоматологічна клініка на вул. Софії Русової, 3",
+            )),
+            output=(_tool_call("https://status-dental-clinic.com.ua/"),),
+        )
+        underlying, _ = _provider(response)
+        budgeted = runtime.BudgetedSearchProvider(underlying, 1)
+        environment = {
+            validate_openai_web_search.LIVE_GATE: "1",
+            "WEBSITE_SEARCH_PROVIDER": "openai",
+            "OPENAI_API_KEY": "SECRET_API_KEY",
+            "MAX_WEBSITE_SEARCH_REQUESTS_PER_TASK": "1",
+            "OPENAI_WEB_SEARCH_MODEL": "gpt-5.4-nano",
+        }
+        config_values = {
+            "OPENAI_WEB_SEARCH_MODEL": "gpt-5.4-nano",
+            "OPENAI_WEB_SEARCH_REASONING_EFFORT": "low",
+            "OPENAI_WEB_SEARCH_CONTEXT_SIZE": "low",
+            "OPENAI_WEB_SEARCH_EXTERNAL_ACCESS": True,
+            "OPENAI_WEB_SEARCH_TIMEOUT_SECONDS": 20.0,
+        }
+        with patch.dict(os.environ, environment, clear=True), patch.multiple(
+            runtime.config, **config_values
+        ), patch.object(
+            runtime, "build_configured_search_provider", return_value=budgeted
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = await validate_openai_web_search._validate()
+        text = output.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIsInstance(text, str)
+        self.assertEqual(text.encode("utf-8").decode("utf-8"), text)
+        self.assertIn("resolution_status=uncertain", text)
+        self.assertIn("resolved_domain=\n", text)
+        self.assertIn("wrong_same_name_domain_returned=yes", text)
+        self.assertIn("wrong_same_name_domain_promoted=no", text)
+        self.assertIn("final_result=technical_success_safe_no_verified_match", text)
+        self.assertNotIn("https://", text)
+        self.assertNotIn("СЃС‚РѕРј", text)
+
+    async def test_tool_limit_failure_has_dedicated_final_result(self):
+        response = _response(
+            output_text=_payload(),
+            output=(_tool_call(), _tool_call(action_type="open_page")),
+        )
+        underlying, _ = _provider(response)
+        budgeted = runtime.BudgetedSearchProvider(underlying, 1)
+        environment = {
+            validate_openai_web_search.LIVE_GATE: "1",
+            "WEBSITE_SEARCH_PROVIDER": "openai",
+            "OPENAI_API_KEY": "SECRET_API_KEY",
+            "MAX_WEBSITE_SEARCH_REQUESTS_PER_TASK": "1",
+            "OPENAI_WEB_SEARCH_MODEL": "gpt-5.4-nano",
+        }
+        config_values = {
+            "OPENAI_WEB_SEARCH_MODEL": "gpt-5.4-nano",
+            "OPENAI_WEB_SEARCH_REASONING_EFFORT": "low",
+            "OPENAI_WEB_SEARCH_CONTEXT_SIZE": "low",
+            "OPENAI_WEB_SEARCH_EXTERNAL_ACCESS": True,
+            "OPENAI_WEB_SEARCH_TIMEOUT_SECONDS": 20.0,
+        }
+        with patch.dict(os.environ, environment, clear=True), patch.multiple(
+            runtime.config, **config_values
+        ), patch.object(
+            runtime, "build_configured_search_provider", return_value=budgeted
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = await validate_openai_web_search._validate()
+        text = output.getvalue()
+        self.assertEqual(result, 1)
+        self.assertIn("requests_failed=1", text)
+        self.assertIn("tool_calls_seen=2", text)
+        self.assertIn("tool_call_limit_exceeded=yes", text)
+        self.assertIn("final_result=tool_call_limit_exceeded", text)
 
 
 class SecurityBoundaryTests(unittest.TestCase):
@@ -603,7 +875,14 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertEqual(OPENAI_WEB_SEARCH_SCHEMA["required"], ["results"])
         self.assertFalse(OPENAI_WEB_SEARCH_SCHEMA["additionalProperties"])
         item_schema = OPENAI_WEB_SEARCH_SCHEMA["properties"]["results"]["items"]
-        self.assertEqual(item_schema["required"], ["url", "title", "snippet"])
+        required = [
+            "url", "title", "snippet", "name_matches", "city_matches",
+            "address_matches", "phone_matches", "different_city_detected",
+        ]
+        self.assertEqual(item_schema["required"], required)
+        self.assertEqual(set(item_schema["properties"]), set(required))
+        for name in required[3:]:
+            self.assertEqual(item_schema["properties"][name], {"type": "boolean"})
         self.assertFalse(item_schema["additionalProperties"])
         forbidden_schema_keys = {"minimum", "maximum", "maxItems", "minItems", "maxLength", "format", "pattern", "default"}
 

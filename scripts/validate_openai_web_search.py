@@ -14,6 +14,18 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 LIVE_GATE = "ALLOW_LIVE_OPENAI_WEB_SEARCH_VALIDATION"
 EXPECTED_DOMAIN = "status-dent.zp.ua"
+WRONG_SAME_NAME_DOMAIN = "status-dental-clinic.com.ua"
+
+
+def _configure_utf8_console() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, TypeError, ValueError):
+            pass
 
 
 def _environment_gate() -> tuple[bool, str]:
@@ -54,6 +66,51 @@ def _error_category(error: BaseException) -> str:
     if isinstance(error, SearchProviderError):
         return "provider_error"
     return "unexpected_error"
+
+
+def _print_telemetry(telemetry: object) -> None:
+    print(f"requests_started={telemetry.requests_started}")
+    print(f"requests_succeeded={telemetry.requests_succeeded}")
+    print(f"requests_failed={telemetry.requests_failed}")
+    print(f"tool_calls_seen={telemetry.tool_calls_seen}")
+    print(f"search_actions_seen={telemetry.search_actions_seen}")
+    print(f"open_page_actions_seen={telemetry.open_page_actions_seen}")
+    print(f"find_in_page_actions_seen={telemetry.find_in_page_actions_seen}")
+    print(f"unknown_actions_seen={telemetry.unknown_actions_seen}")
+    print(f"sources_seen={telemetry.sources_seen}")
+    print(f"identity_candidates_rejected={telemetry.identity_candidates_rejected}")
+    print(
+        "tool_call_limit_exceeded="
+        f"{'yes' if telemetry.tool_call_limit_exceeded else 'no'}"
+    )
+
+
+def _resolve_results(results: tuple[object, ...]):
+    from website_candidate_matching import (
+        BusinessIdentity,
+        SourceAttempt,
+        SourceAttemptStatus,
+        candidate_from_search_result,
+        resolve_website_candidates,
+    )
+    from website_resolution import CandidateSource
+
+    identity = BusinessIdentity(
+        name="STATUS стоматологія",
+        city="Запоріжжя",
+        address="вул. Поштова, 161/36",
+    )
+    candidates = tuple(candidate_from_search_result(result) for result in results)
+    attempt = SourceAttempt(
+        CandidateSource.WEB_SEARCH,
+        SourceAttemptStatus.COMPLETED,
+    )
+    return resolve_website_candidates(
+        identity,
+        candidates,
+        (attempt,),
+        (CandidateSource.WEB_SEARCH,),
+    )
 
 
 async def _validate() -> int:
@@ -102,11 +159,10 @@ async def _validate() -> int:
             print(f"request_budget_used={budget.used_requests}")
             print(f"request_budget_remaining={budget.remaining_requests}")
         if telemetry is not None:
-            print(f"requests_started={telemetry.requests_started}")
-            print(f"requests_succeeded={telemetry.requests_succeeded}")
-            print(f"requests_failed={telemetry.requests_failed}")
-            print(f"tool_calls_seen={telemetry.tool_calls_seen}")
-            print(f"sources_seen={telemetry.sources_seen}")
+            _print_telemetry(telemetry)
+            if telemetry.tool_call_limit_exceeded:
+                print("final_result=tool_call_limit_exceeded")
+                return 1
         print(f"final_result={_error_category(error)}")
         return 1
 
@@ -117,26 +173,36 @@ async def _validate() -> int:
         print(f"request_budget_used={budget.used_requests}")
         print(f"request_budget_remaining={budget.remaining_requests}")
     if telemetry is not None:
-        print(f"requests_started={telemetry.requests_started}")
-        print(f"requests_succeeded={telemetry.requests_succeeded}")
-        print(f"requests_failed={telemetry.requests_failed}")
-        print(f"tool_calls_seen={telemetry.tool_calls_seen}")
-        print(f"sources_seen={telemetry.sources_seen}")
-    print(f"result_count={len(results)}")
-    print(f"normalized_result_domains={','.join(domains)}")
-    for result in results:
-        print(f"title={result.title[:100]}")
-    found = EXPECTED_DOMAIN in domains
-    print(f"expected_domain_found={'yes' if found else 'no'}")
-    print(
-        "final_result=success"
-        if found
-        else "final_result=technical_success_expected_domain_missing"
+        _print_telemetry(telemetry)
+        if telemetry.tool_call_limit_exceeded:
+            print("final_result=tool_call_limit_exceeded")
+            return 1
+
+    resolution = _resolve_results(results)
+    resolved_domain = (
+        normalize_domain(resolution.resolved_url)
+        if resolution.resolved_url is not None
+        else ""
     )
-    return 0 if found else 1
+    found = EXPECTED_DOMAIN in domains
+    wrong_returned = WRONG_SAME_NAME_DOMAIN in domains
+    wrong_promoted = resolved_domain == WRONG_SAME_NAME_DOMAIN
+    print(f"resolution_status={resolution.status.value}")
+    print(f"resolved_domain={resolved_domain}")
+    print(f"wrong_same_name_domain_returned={'yes' if wrong_returned else 'no'}")
+    print(f"wrong_same_name_domain_promoted={'yes' if wrong_promoted else 'no'}")
+    if wrong_promoted:
+        print("final_result=unsafe_wrong_business_promoted")
+        return 1
+    if found:
+        print("final_result=success_expected_domain_found")
+        return 0
+    print("final_result=technical_success_safe_no_verified_match")
+    return 0
 
 
 def main() -> int:
+    _configure_utf8_console()
     return asyncio.run(_validate())
 
 
