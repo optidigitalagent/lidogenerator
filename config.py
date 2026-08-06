@@ -146,3 +146,26 @@ OPENAI_SCORING_TIMEOUT_SECONDS = _environment_float(
 
 # --- Прогресс ---
 PROGRESS_INTERVAL = 180         # отправлять прогресс каждые 3 минуты (180 сек)
+
+
+# --- Доступ пользователей ---
+def _environment_user_ids(name: str) -> set[int]:
+    """Список Telegram user_id через запятую. Пусто = доступ разрешён всем."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return set()
+    ids: set[int] = set()
+    for chunk in re.split(r"[,\s;]+", raw):
+        if not chunk:
+            continue
+        if re.fullmatch(r"[0-9]+", chunk) is None:
+            raise ValueError(f"{name} must contain only numeric Telegram user IDs")
+        ids.add(int(chunk))
+    return ids
+
+
+# Если ALLOWED_USER_IDS пуст — ботом может пользоваться любой пользователь.
+ALLOWED_USER_IDS = _environment_user_ids("ALLOWED_USER_IDS")
+
+# Сколько поисков может выполняться одновременно (разные пользователи).
+MAX_CONCURRENT_SEARCHES = _environment_integer("MAX_CONCURRENT_SEARCHES", "3", 1, 20)
