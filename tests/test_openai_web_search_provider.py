@@ -7,6 +7,7 @@ import io
 import json
 import math
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -184,6 +185,11 @@ class SettingsTests(unittest.TestCase):
 
 
 class InputBuilderTests(unittest.TestCase):
+    @staticmethod
+    def _variants(prompt):
+        marker = "Suggested query variants:\n"
+        return tuple(prompt.split(marker, 1)[1].splitlines())
+
     def test_deterministic_identity_and_optional_fields(self):
         first = build_openai_web_search_input(SearchRequest(
             " Business ", " City ", " Address ", "+380671234567", max_results=3
@@ -196,8 +202,7 @@ class InputBuilderTests(unittest.TestCase):
             self.assertIn(expected, first)
         self.assertIn("empty results array", first)
         self.assertIn("same-name business", first)
-        self.assertIn("City must match exactly", first)
-        self.assertIn("source evidence must match that address", first)
+        self.assertIn("city must match exactly", first)
         self.assertIn("one search action only", first)
         self.assertIn("Do not use open_page or find_in_page", first)
         self.assertLessEqual(first.count('\n1. '), 1)
@@ -206,16 +211,94 @@ class InputBuilderTests(unittest.TestCase):
         self.assertNotIn("API key", first)
         self.assertNotIn("evidence JSON", first)
 
+    def test_phone_and_address_query_variants_are_exact(self):
+        prompt = build_openai_web_search_input(SearchRequest(
+            "Business", "City", "Address", "+380671234567"
+        ))
+        self.assertEqual(self._variants(prompt), (
+            '1. "Business" "380671234567"',
+            '2. "Business" "City" "Address"',
+            '3. "Business" "City"',
+        ))
+
+    def test_phone_only_query_variants_are_exact(self):
+        prompt = build_openai_web_search_input(SearchRequest(
+            "Business", "City", phone="+380671234567"
+        ))
+        self.assertEqual(self._variants(prompt), (
+            '1. "Business" "380671234567"',
+            '2. "380671234567" "City"',
+            '3. "Business" "City"',
+        ))
+
+    def test_address_only_query_variants_are_preserved(self):
+        prompt = build_openai_web_search_input(SearchRequest(
+            "Business", "City", "Address"
+        ))
+        self.assertEqual(self._variants(prompt), (
+            '1. "Business" "City" "Address"',
+            '2. "Business" "City"',
+            '3. "Address" "Business"',
+        ))
+
+    def test_name_and_city_are_the_only_variant_without_optional_identity(self):
+        prompt = build_openai_web_search_input(SearchRequest("Business", "City"))
+        self.assertEqual(
+            self._variants(prompt),
+            ('1. "Business" "City"',),
+        )
+
+    def test_variants_are_deduplicated_and_never_exceed_three(self):
+        requests = (
+            SearchRequest("Same", "Same"),
+            SearchRequest("Same", "Same", "Same"),
+            SearchRequest("1234567", "City", phone="1234567"),
+            SearchRequest("Business", "City", "Address", "1234567"),
+        )
+        for request in requests:
+            with self.subTest(request=request):
+                variants = self._variants(build_openai_web_search_input(request))
+                self.assertLessEqual(len(variants), 3)
+                self.assertEqual(len(variants), len(set(variants)))
+
+    def test_prompt_does_not_emit_unrequested_domain_literals(self):
+        prompt = build_openai_web_search_input(SearchRequest(
+            "Generic Business", "Generic City", "Generic Address", "1234567"
+        ))
+        domain_tokens = re.findall(
+            r"\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\b",
+            prompt,
+        )
+        self.assertEqual(domain_tokens, [])
+
+    def test_prompt_semantics_match_address_or_exact_phone_prefilter(self):
+        prompt = build_openai_web_search_input(SearchRequest(
+            "Business", "City", "Address", "1234567"
+        ))
+        for expected in (
+            "Name and city must both match",
+            "Different city evidence requires rejection",
+            "exact address evidence is preferred",
+            "Exact phone evidence may substitute for address evidence",
+            "same named business in the same city",
+            "address and phone corroboration are both absent or false",
+            "Do not return a best guess",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, prompt)
+
     def test_controls_removed_and_long_values_bounded_without_losing_labels(self):
         prompt = build_openai_web_search_input(SearchRequest(
             "N\x00a\nme " * 200,
             "C\x1fity " * 200,
             "Address " * 300,
+            "+380671234567",
         ))
         self.assertEqual(prompt, build_openai_web_search_input(SearchRequest(
             "N\x00a\nme " * 200,
             "C\x1fity " * 200,
             "Address " * 300,
+            "+380671234567",
         )))
         self.assertLessEqual(len(prompt), 2000)
         self.assertNotIn("\x00", prompt)
@@ -416,6 +499,39 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(await without_phone.search(REQUEST), ())
         self.assertEqual(without_phone.telemetry().identity_candidates_rejected, 1)
+
+    async def test_phone_corroboration_still_requires_name_and_correct_city(self):
+        request = SearchRequest("Name", "City", "Address", "+380671234567")
+        rejected_flags = (
+            {"address_matches": False, "phone_matches": False},
+            {
+                "address_matches": False,
+                "phone_matches": True,
+                "city_matches": False,
+            },
+            {
+                "address_matches": False,
+                "phone_matches": True,
+                "different_city_detected": True,
+            },
+            {
+                "address_matches": False,
+                "phone_matches": True,
+                "name_matches": False,
+            },
+        )
+        for flags in rejected_flags:
+            with self.subTest(flags=flags):
+                response = _response(
+                    output_text=_payload(_item("https://rejected.example/", **flags)),
+                    output=(_tool_call("https://rejected.example/"),),
+                )
+                provider, _ = _provider(response)
+                self.assertEqual(await provider.search(request), ())
+                self.assertEqual(
+                    provider.telemetry().identity_candidates_rejected,
+                    1,
+                )
 
     async def test_action_accounting_and_only_search_sources_are_eligible(self):
         cases = (
