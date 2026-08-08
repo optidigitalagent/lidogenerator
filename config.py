@@ -216,3 +216,21 @@ ALLOWED_USER_IDS = _environment_user_ids("ALLOWED_USER_IDS")
 
 # Сколько поисков может выполняться одновременно (разные пользователи).
 MAX_CONCURRENT_SEARCHES = _environment_integer("MAX_CONCURRENT_SEARCHES", "3", 1, 20)
+
+# --- Opti Bridge v0 ---
+# Delivery is opt-in. Discovery/export remains fully functional while disabled
+# or while the remote Opti service is unavailable.
+OPTI_BRIDGE_ENABLED = (
+    _environment_boolean("OPTI_BRIDGE_ENABLED", "false") == "true"
+)
+OPTI_BASE_URL = os.getenv("OPTI_BASE_URL", "").strip()
+OPTI_IMPORT_TOKEN = os.getenv("OPTI_IMPORT_TOKEN", "").strip()
+OPTI_IMPORT_TIMEOUT_SECONDS = _environment_float(
+    "OPTI_IMPORT_TIMEOUT_SECONDS", "20", 0.0, 60.0
+)
+OPTI_SYNC_MAX_ATTEMPTS = _environment_integer(
+    "OPTI_SYNC_MAX_ATTEMPTS", "8", 1, 100
+)
+OPTI_SYNC_RETRY_BASE_SECONDS = _environment_integer(
+    "OPTI_SYNC_RETRY_BASE_SECONDS", "30", 1, 3600
+)

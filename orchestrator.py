@@ -26,6 +26,7 @@ import config
 import db
 from agents import collector, site_checker, social_checker, ai_scorer, reporter, website_resolver
 from models import Business
+from integrations.opti_bridge import finalize_completed_task
 from website_candidate_matching import SearchProvider
 from website_pipeline import LeadDecision, ResolverMode, parse_resolver_mode, qualify_lead
 from website_search_runtime import (
@@ -550,6 +551,9 @@ async def run_search(
         xlsx_path = reporter.export_excel(leads, task_id=task_id)
         out_path = xlsx_path or csv_path
         db.update_task_status(task_id, "done", csv_path=out_path)
+        # The bridge reads the final qualified rows back from SQLite. It never
+        # parses the human CSV/XLSX export, and remote failure cannot fail search.
+        opti_summary = await finalize_completed_task(task_id)
 
         # --- Финальный отчёт ---
         added_no_site, added_bad_site = _added_counts()
@@ -574,7 +578,8 @@ async def run_search(
             f"Додано з поганим сайтом: {added_bad_site}\n"
             f"➡️ Усього лідів у таблиці: {len(leads)}\n"
             f"Причина зупинки: {reason}"
-            + shortage,
+            + shortage
+            + (f"\n{opti_summary}" if opti_summary else ""),
             force=True,
         )
         if progress_callback and leads:

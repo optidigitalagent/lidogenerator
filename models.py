@@ -18,8 +18,14 @@ class Business:
     city: str = ""                      # город поиска
     phone: str = ""                     # телефон
     address: str = ""                   # адрес
+    category: str = ""                  # категория из карточки, если доступна
+    email: str = ""                     # email источника, если доступен
     website: str = ""                   # сайт (если указан в профиле Maps)
     instagram_url: str = ""             # ссылка на Instagram (если есть)
+    google_maps_url: str = ""           # URL исходной карточки Maps
+    google_place_id: str = ""           # Google Place ID, если доступен
+    external_candidate_id: str = ""     # стабильный ID внешнего кандидата
+    collected_at: str = ""              # время сбора ISO-8601
     rating: float = 0.0                 # рейтинг на Maps
     reviews_count: int = 0              # количество отзывов на Maps
 
