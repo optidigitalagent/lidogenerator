@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """SQLite: хранение задач поиска и найденных бизнесов."""
 
+import hashlib
 import sqlite3
+import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterator, List, Optional
 
 import config
 from models import Business
+
+OPTI_SYNC_CONTRACT_VERSION = "opti.lead-import.v1"
 
 
 @contextmanager
@@ -36,7 +40,9 @@ def init_db() -> None:
                 chat_id     INTEGER,                       -- чат Telegram, запустивший задачу
                 csv_path    TEXT,                          -- путь к готовому CSV
                 created_at  TEXT NOT NULL,
-                finished_at TEXT
+                finished_at TEXT,
+                external_batch_id TEXT,
+                opti_sync_contract_version TEXT
             );
 
             CREATE TABLE IF NOT EXISTS businesses (
@@ -47,8 +53,14 @@ def init_db() -> None:
                 city             TEXT,
                 phone            TEXT,
                 address          TEXT,
+                category         TEXT DEFAULT '',
+                email            TEXT DEFAULT '',
                 website          TEXT,
                 instagram_url    TEXT,
+                google_maps_url  TEXT DEFAULT '',
+                google_place_id  TEXT DEFAULT '',
+                external_candidate_id TEXT DEFAULT '',
+                collected_at     TEXT DEFAULT '',
                 rating           REAL DEFAULT 0,
                 reviews_count    INTEGER DEFAULT 0,
                 has_site         INTEGER DEFAULT 0,
@@ -80,12 +92,55 @@ def init_db() -> None:
             -- Дубликаты по телефону внутри одной задачи не сохраняем
             CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_phone
                 ON businesses(task_id, phone) WHERE phone != '';
+
+            CREATE TABLE IF NOT EXISTS opti_sync_outbox (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                externalBatchId     TEXT NOT NULL UNIQUE,
+                schemaVersion       TEXT NOT NULL,
+                payloadJson         TEXT NOT NULL,
+                payloadHash         TEXT NOT NULL,
+                idempotencyKey      TEXT NOT NULL,
+                status              TEXT NOT NULL DEFAULT 'PENDING'
+                    CHECK (status IN ('PENDING', 'SENDING', 'SENT', 'RETRY', 'FAILED')),
+                attempts            INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+                nextAttemptAt       TEXT,
+                lastErrorCode       TEXT,
+                lastErrorMessage    TEXT,
+                optiBatchId         TEXT,
+                responseSummaryJson TEXT,
+                createdAt           TEXT NOT NULL,
+                updatedAt           TEXT NOT NULL,
+                sentAt              TEXT,
+                CHECK (
+                    length(payloadHash) = 64
+                    AND payloadHash = lower(payloadHash)
+                    AND payloadHash NOT GLOB '*[^0-9a-f]*'
+                ),
+                CHECK (length(lastErrorMessage) <= 1000)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_opti_outbox_due
+                ON opti_sync_outbox(status, nextAttemptAt, id);
+
+            CREATE TRIGGER IF NOT EXISTS trg_opti_outbox_payload_immutable
+            BEFORE UPDATE OF externalBatchId, schemaVersion, payloadJson,
+                payloadHash, idempotencyKey ON opti_sync_outbox
+            BEGIN
+                SELECT RAISE(ABORT, 'Opti outbox payload is immutable');
+            END;
             """
         )
+        _migrate_tasks(conn)
         _migrate_businesses(conn)
 
 
 _BUSINESS_MIGRATIONS = {
+    "category": "TEXT DEFAULT ''",
+    "email": "TEXT DEFAULT ''",
+    "google_maps_url": "TEXT DEFAULT ''",
+    "google_place_id": "TEXT DEFAULT ''",
+    "external_candidate_id": "TEXT DEFAULT ''",
+    "collected_at": "TEXT DEFAULT ''",
     "website_original_url": "TEXT DEFAULT ''",
     "instagram_bio_url": "TEXT DEFAULT ''",
     "website_resolved_url": "TEXT DEFAULT ''",
@@ -104,6 +159,29 @@ _BUSINESS_MIGRATIONS = {
 }
 
 
+def _migrate_tasks(conn: sqlite3.Connection) -> None:
+    """Add a durable external batch identity without changing local task IDs."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+    if "external_batch_id" not in existing:
+        conn.execute("ALTER TABLE tasks ADD COLUMN external_batch_id TEXT")
+    if "opti_sync_contract_version" not in existing:
+        conn.execute("ALTER TABLE tasks ADD COLUMN opti_sync_contract_version TEXT")
+    rows = conn.execute(
+        "SELECT id, created_at FROM tasks WHERE external_batch_id IS NULL"
+    ).fetchall()
+    for row in rows:
+        seed = f"legacy:{row['id']}:{row['created_at']}".encode("utf-8")
+        suffix = hashlib.sha256(seed).hexdigest()[:24]
+        conn.execute(
+            "UPDATE tasks SET external_batch_id = ? WHERE id = ?",
+            (f"legacy-task-{suffix}", row["id"]),
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_external_batch_id "
+        "ON tasks(external_batch_id)"
+    )
+
+
 def _migrate_businesses(conn: sqlite3.Connection) -> None:
     """Add Phase 3 columns to an existing table without rebuilding it."""
     existing = {
@@ -120,9 +198,20 @@ def create_task(niche: str, city: str, count: int, chat_id: Optional[int] = None
     """Создать задачу поиска, вернуть её id."""
     with _connect() as conn:
         cur = conn.execute(
-            "INSERT INTO tasks (niche, city, count, status, chat_id, created_at) "
-            "VALUES (?, ?, ?, 'new', ?, ?)",
-            (niche, city, count, chat_id, datetime.now().isoformat(timespec="seconds")),
+            "INSERT INTO tasks (niche, city, count, status, chat_id, created_at, "
+            "external_batch_id, opti_sync_contract_version) "
+            "VALUES (?, ?, ?, 'new', ?, ?, ?, ?)",
+            (
+                niche,
+                city,
+                count,
+                chat_id,
+                datetime.now(timezone.utc)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z"),
+                str(uuid.uuid4()),
+                OPTI_SYNC_CONTRACT_VERSION,
+            ),
         )
         return cur.lastrowid
 
@@ -130,7 +219,9 @@ def create_task(niche: str, city: str, count: int, chat_id: Optional[int] = None
 def update_task_status(task_id: int, status: str, csv_path: Optional[str] = None) -> None:
     """Обновить статус задачи; для финальных статусов проставить время окончания."""
     finished = (
-        datetime.now().isoformat(timespec="seconds")
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
         if status in ("done", "error", "stopped")
         else None
     )
@@ -160,11 +251,36 @@ def get_last_task(chat_id: Optional[int] = None) -> Optional[sqlite3.Row]:
         return conn.execute("SELECT * FROM tasks ORDER BY id DESC LIMIT 1").fetchone()
 
 
+def get_completed_tasks_for_opti_reconciliation(limit: int = 100) -> List[sqlite3.Row]:
+    """Return eligible completed tasks that do not yet have a durable outbox row."""
+    bounded_limit = max(0, min(int(limit), 1000))
+    with _connect() as conn:
+        return conn.execute(
+            """
+            SELECT tasks.*
+            FROM tasks
+            WHERE tasks.status = 'done'
+              AND tasks.opti_sync_contract_version = ?
+              AND EXISTS (
+                  SELECT 1 FROM businesses WHERE businesses.task_id = tasks.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM opti_sync_outbox
+                  WHERE opti_sync_outbox.externalBatchId = tasks.external_batch_id
+              )
+            ORDER BY tasks.id ASC
+            LIMIT ?
+            """,
+            (OPTI_SYNC_CONTRACT_VERSION, bounded_limit),
+        ).fetchall()
+
+
 # ---------- Бизнесы ----------
 
 _BUSINESS_COLUMNS = (
-    "task_id", "name", "niche", "city", "phone", "address", "website",
-    "instagram_url", "rating", "reviews_count", "has_site", "site_quality",
+    "task_id", "name", "niche", "city", "phone", "address", "category", "email", "website",
+    "instagram_url", "google_maps_url", "google_place_id", "external_candidate_id",
+    "collected_at", "rating", "reviews_count", "has_site", "site_quality",
     "instagram_active", "followers", "posts_count", "last_post_days",
     "ai_score", "ai_priority", "ai_reason",
     "website_original_url", "instagram_bio_url", "website_resolved_url",
@@ -240,4 +356,20 @@ def get_businesses(task_id: int) -> List[Business]:
         d["has_site"] = bool(d["has_site"])
         d["instagram_active"] = bool(d["instagram_active"])
         result.append(Business(**d))
+    return result
+
+
+def get_businesses_for_bridge(task_id: int) -> List[Business]:
+    """Return the persisted final set in stable insertion/rank order."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM businesses WHERE task_id = ? ORDER BY id ASC",
+            (task_id,),
+        ).fetchall()
+    result = []
+    for row in rows:
+        data = dict(row)
+        data["has_site"] = bool(data["has_site"])
+        data["instagram_active"] = bool(data["instagram_active"])
+        result.append(Business(**data))
     return result

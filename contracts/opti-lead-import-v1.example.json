@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "opti.lead-import.v1",
+  "sourceSystem": "lidogenerator",
+  "externalBatchId": "stable-search-job-id",
+  "batchStatus": "COMPLETED",
+  "generatedAt": "2026-08-08T10:00:00Z",
+  "search": {
+    "niche": "стоматология",
+    "city": "Запорожье",
+    "targetCount": 50,
+    "resultCount": 1,
+    "startedAt": "2026-08-08T09:00:00Z",
+    "completedAt": "2026-08-08T10:00:00Z"
+  },
+  "leads": [
+    {
+      "externalLeadId": "stable-id",
+      "identityBasis": "GOOGLE_PLACE_ID",
+      "rank": 1,
+      "name": "Bella Dent",
+      "category": "Стоматологическая клиника",
+      "city": "Запорожье",
+      "address": "проспект Соборный, 1",
+      "phone": "+380501234567",
+      "email": null,
+      "instagramUrl": "https://instagram.com/belladent",
+      "websiteUrl": null,
+      "googleMapsUrl": "https://maps.google.com/?cid=123456",
+      "googlePlaceId": "ChIJ-stable-example",
+      "rating": 4.8,
+      "reviewCount": 120,
+      "websiteAssessment": {
+        "status": "NO_SITE",
+        "hasSite": false,
+        "siteQuality": "none",
+        "checkedAt": "2026-08-08T09:30:00Z",
+        "finalUrl": null
+      },
+      "collectedAt": "2026-08-08T09:20:00Z"
+    }
+  ]
+}

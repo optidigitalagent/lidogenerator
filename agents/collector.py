@@ -10,6 +10,7 @@ import asyncio
 import random
 import re
 import urllib.parse
+from datetime import datetime, timezone
 from typing import AsyncIterator, Awaitable, Callable, List, Optional
 
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout, async_playwright
@@ -61,7 +62,12 @@ async def _extract_business(page: Page, url: str, niche: str, city: str) -> Opti
     await page.goto(url, wait_until="domcontentloaded", timeout=30000)
     await _accept_consent(page)
 
-    b = Business(niche=niche, city=city)
+    b = Business(
+        niche=niche,
+        city=city,
+        google_maps_url=url,
+        collected_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    )
 
     # Название
     try:
