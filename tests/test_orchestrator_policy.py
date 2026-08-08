@@ -61,6 +61,7 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
         collector_limits: list[int] = []
         decisions = []
         statuses = Mock()
+        opti_finalizations = []
         visited = 0
         resolver_calls = []
         events = []
@@ -124,6 +125,17 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
 
             return inner
 
+        async def fake_finalize(task_id):
+            opti_finalizations.append(
+                {
+                    "task_id": task_id,
+                    "csv": list(downstream["csv"]),
+                    "excel": list(downstream["excel"]),
+                    "statuses": list(statuses.call_args_list),
+                }
+            )
+            return ""
+
         real_decide_next = orchestrator.decide_next
 
         def record_decision(progress, policy):
@@ -160,6 +172,7 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
             patch.object(orchestrator.reporter, "export_csv", side_effect=capture("csv")),
             patch.object(orchestrator.reporter, "export_excel", side_effect=capture("excel")),
             patch.object(orchestrator.reporter, "format_leads_summary", side_effect=capture("summary")),
+            patch.object(orchestrator, "finalize_completed_task", new=fake_finalize),
             patch.object(orchestrator, "decide_next", side_effect=record_decision),
         ):
             result = await orchestrator.run_search(
@@ -180,6 +193,7 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
             "statuses": statuses.call_args_list,
             "resolver_calls": resolver_calls,
             "events": events,
+            "opti_finalizations": opti_finalizations,
         }
 
     async def test_resolver_mode_off_skips_resolver(self) -> None:
@@ -207,6 +221,24 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(run["resolver_calls"][0][1], provider)
         self.assertIsNot(run["resolver_calls"][0][0][0], business)
         self.assertEqual(business.lead_decision, "")
+
+    async def test_completed_shadow_finalizes_opti_after_legacy_output(self) -> None:
+        run = await self._run(
+            target=1,
+            max_candidates=2,
+            batches=[[_lead("one")]],
+            resolver_mode="shadow",
+        )
+
+        self.assertEqual(len(run["opti_finalizations"]), 1)
+        finalization = run["opti_finalizations"][0]
+        self.assertEqual(finalization["task_id"], 1)
+        self.assertEqual([item.name for item in finalization["csv"][0]], ["one"])
+        self.assertEqual([item.name for item in finalization["excel"][0]], ["one"])
+        self.assertIn(
+            unittest.mock.call(1, "done", csv_path="result.xlsx"),
+            finalization["statuses"],
+        )
 
     async def test_strict_qualification_matrix_is_fail_closed(self) -> None:
         official = CandidateEvidence(
