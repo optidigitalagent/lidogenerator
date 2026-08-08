@@ -577,6 +577,31 @@ class CandidateAssessmentTests(unittest.TestCase):
         self.assertEqual(evidence.rejected_reason, "insufficient_identity_evidence")
         self.assertNotIn(MatchSignal.NAME_EXACT.value, evidence.matched_signals)
 
+    def test_combined_source_corroboration_cannot_replace_deterministic_name(self) -> None:
+        evidence = assess_website_candidate(
+            BusinessIdentity(
+                "Business Dental",
+                "City",
+                "Address Street 10",
+                "+380671234567",
+            ),
+            _candidate(
+                url="https://unrelated.example/",
+                title="Official clinic website",
+                identity_evidence=_source_evidence(phone_matches=True),
+            ),
+        )
+        self.assertIs(evidence.kind, CandidateKind.UNKNOWN)
+        self.assertEqual(evidence.rejected_reason, "insufficient_identity_evidence")
+        self.assertEqual(
+            evidence.matched_signals,
+            (
+                MatchSignal.SOURCE_ADDRESS_CORROBORATION.value,
+                MatchSignal.SOURCE_PHONE_CORROBORATION.value,
+            ),
+        )
+        self.assertEqual(evidence.confidence, 0.60)
+
     def test_source_unbound_evidence_is_ignored(self) -> None:
         cases = (
             _source_evidence(
