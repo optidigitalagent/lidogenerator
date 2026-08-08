@@ -15,6 +15,7 @@ from website_candidate_matching import (
     ProviderUnavailable,
     SearchProvider,
     SearchProviderError,
+    SearchIdentityEvidence,
     SearchRequest,
     SearchResult,
 )
@@ -584,6 +585,14 @@ class OpenAIWebSearchProvider(SearchProvider):
                 item["title"][:_TITLE_LIMIT],
                 item["snippet"][:_SNIPPET_LIMIT],
                 len(results) + 1,
+                SearchIdentityEvidence(
+                    name_matches=item["name_matches"],
+                    city_matches=item["city_matches"],
+                    address_matches=item["address_matches"],
+                    phone_matches=item["phone_matches"],
+                    different_city_detected=item["different_city_detected"],
+                    candidate_url_source_bound=True,
+                ),
             ))
             if len(results) >= count:
                 break

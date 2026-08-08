@@ -227,6 +227,30 @@ class SearchRequest:
 
 
 @dataclass(frozen=True)
+class SearchIdentityEvidence:
+    """Non-authoritative provider assertions for identity corroboration.
+
+    ``candidate_url_source_bound=True`` means only that the candidate URL
+    appeared in the provider's trusted/search source allowlist. It does not
+    mean that name, address, or phone assertions were independently extracted.
+    The matcher may use this object only as corroboration, never as sole
+    authority.
+    """
+
+    name_matches: bool
+    city_matches: bool
+    address_matches: bool
+    phone_matches: bool
+    different_city_detected: bool
+    candidate_url_source_bound: bool
+
+    def __post_init__(self) -> None:
+        for field_name in self.__dataclass_fields__:
+            if type(getattr(self, field_name)) is not bool:
+                raise TypeError(f"{field_name} must be a bool")
+
+
+@dataclass(frozen=True)
 class SearchResult:
     """One validated result returned by a search provider."""
 
@@ -234,6 +258,7 @@ class SearchResult:
     title: str
     snippet: str
     rank: int
+    identity_evidence: SearchIdentityEvidence | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "url", normalize_candidate_url(self.url))
@@ -243,6 +268,13 @@ class SearchResult:
             raise TypeError("rank must be an integer")
         if self.rank < 1:
             raise ValueError("rank must be at least 1")
+        if (
+            self.identity_evidence is not None
+            and type(self.identity_evidence) is not SearchIdentityEvidence
+        ):
+            raise TypeError(
+                "identity_evidence must be exactly a SearchIdentityEvidence or None"
+            )
 
 
 @runtime_checkable
@@ -316,6 +348,7 @@ class WebsiteCandidate:
     contact_phones: tuple[str, ...] = ()
     contact_addresses: tuple[str, ...] = ()
     instagram_usernames: tuple[str, ...] = ()
+    identity_evidence: SearchIdentityEvidence | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, CandidateSource):
@@ -375,6 +408,14 @@ class WebsiteCandidate:
             usernames.append(normalized_username)
         object.__setattr__(self, "instagram_usernames", tuple(usernames))
 
+        if (
+            self.identity_evidence is not None
+            and type(self.identity_evidence) is not SearchIdentityEvidence
+        ):
+            raise TypeError(
+                "identity_evidence must be exactly a SearchIdentityEvidence or None"
+            )
+
 
 def candidate_from_search_result(result: SearchResult) -> WebsiteCandidate:
     """Convert one validated provider result to a web-search candidate."""
@@ -386,6 +427,7 @@ def candidate_from_search_result(result: SearchResult) -> WebsiteCandidate:
         url=result.url,
         title=result.title,
         snippet=result.snippet,
+        identity_evidence=result.identity_evidence,
     )
 
 
@@ -453,6 +495,8 @@ class MatchSignal(str, Enum):
     NAME_TOKEN_OVERLAP = "name_token_overlap"
     CITY_EXACT = "city_exact"
     ADDRESS_TOKEN_OVERLAP = "address_token_overlap"
+    SOURCE_ADDRESS_CORROBORATION = "source_address_corroboration"
+    SOURCE_PHONE_CORROBORATION = "source_phone_corroboration"
     INSTAGRAM_USERNAME = "instagram_username"
     DOMAIN_NAME_OVERLAP = "domain_name_overlap"
 
@@ -463,6 +507,8 @@ _SIGNAL_WEIGHTS = (
     (MatchSignal.NAME_TOKEN_OVERLAP, 0.25),
     (MatchSignal.CITY_EXACT, 0.10),
     (MatchSignal.ADDRESS_TOKEN_OVERLAP, 0.30),
+    (MatchSignal.SOURCE_ADDRESS_CORROBORATION, 0.30),
+    (MatchSignal.SOURCE_PHONE_CORROBORATION, 0.30),
     (MatchSignal.INSTAGRAM_USERNAME, 0.30),
     (MatchSignal.DOMAIN_NAME_OVERLAP, 0.10),
 )
@@ -580,6 +626,22 @@ def assess_website_candidate(
             rejected_reason="conflicting_city",
         )
 
+    source_evidence = candidate.identity_evidence
+    if (
+        source_evidence is not None
+        and source_evidence.candidate_url_source_bound
+        and (
+            not source_evidence.name_matches
+            or not source_evidence.city_matches
+            or source_evidence.different_city_detected
+        )
+    ):
+        return _evidence(
+            candidate,
+            kind=CandidateKind.UNKNOWN,
+            rejected_reason="conflicting_source_identity_evidence",
+        )
+
     signals: list[MatchSignal] = []
     if identity.phone is not None and any(
         _phones_equivalent(identity.phone, phone) for phone in candidate_phones
@@ -620,6 +682,19 @@ def assess_website_candidate(
         ):
             signals.append(MatchSignal.ADDRESS_TOKEN_OVERLAP)
 
+    source_corroboration_allowed = (
+        source_evidence is not None
+        and source_evidence.candidate_url_source_bound
+        and source_evidence.name_matches
+        and source_evidence.city_matches
+        and not source_evidence.different_city_detected
+    )
+    if source_corroboration_allowed:
+        if identity.address is not None and source_evidence.address_matches:
+            signals.append(MatchSignal.SOURCE_ADDRESS_CORROBORATION)
+        if identity.phone is not None and source_evidence.phone_matches:
+            signals.append(MatchSignal.SOURCE_PHONE_CORROBORATION)
+
     if identity.instagram_url is not None:
         username = normalize_instagram_username(identity.instagram_url)
         if username in candidate.instagram_usernames or any(
@@ -648,6 +723,8 @@ def assess_website_candidate(
         signal in signal_tuple
         for signal in (
             MatchSignal.ADDRESS_TOKEN_OVERLAP,
+            MatchSignal.SOURCE_ADDRESS_CORROBORATION,
+            MatchSignal.SOURCE_PHONE_CORROBORATION,
             MatchSignal.INSTAGRAM_USERNAME,
         )
     )

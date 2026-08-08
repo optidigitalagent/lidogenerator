@@ -16,6 +16,7 @@ from website_candidate_matching import (
     ProviderUnavailable,
     SearchProvider,
     SearchProviderError,
+    SearchIdentityEvidence,
     SearchRequest,
     SearchResult,
     SourceAttempt,
@@ -52,6 +53,19 @@ def _candidate(**overrides) -> WebsiteCandidate:
     }
     values.update(overrides)
     return WebsiteCandidate(**values)
+
+
+def _source_evidence(**overrides) -> SearchIdentityEvidence:
+    values = {
+        "name_matches": True,
+        "city_matches": True,
+        "address_matches": True,
+        "phone_matches": False,
+        "different_city_detected": False,
+        "candidate_url_source_bound": True,
+    }
+    values.update(overrides)
+    return SearchIdentityEvidence(**values)
 
 
 def _attempt(
@@ -277,8 +291,28 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(result.url, "https://example.com/")
         self.assertEqual(result.title, "Lido Beauty")
         self.assertEqual(result.snippet, "")
+        self.assertIsNone(result.identity_evidence)
         with self.assertRaises(dataclasses.FrozenInstanceError):
             result.rank = 2
+
+    def test_search_identity_evidence_is_strict_and_frozen(self) -> None:
+        evidence = _source_evidence()
+        self.assertTrue(evidence.name_matches)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            evidence.name_matches = False
+        for field_name in SearchIdentityEvidence.__dataclass_fields__:
+            for invalid in (1, None, "true"):
+                with self.subTest(field=field_name, invalid=invalid), self.assertRaises(
+                    TypeError
+                ):
+                    _source_evidence(**{field_name: invalid})
+
+    def test_search_result_accepts_only_typed_identity_evidence(self) -> None:
+        evidence = _source_evidence()
+        result = SearchResult("https://example.com", "", "", 1, evidence)
+        self.assertIs(result.identity_evidence, evidence)
+        with self.assertRaises(TypeError):
+            SearchResult("https://example.com", "", "", 1, object())
 
     def test_search_result_rejects_invalid_fields(self) -> None:
         with self.assertRaises(ValueError):
@@ -307,12 +341,14 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(SearchProviderError.__bases__, (RuntimeError,))
 
     def test_search_result_conversion(self) -> None:
-        result = SearchResult("https://example.com", "Title", "Snippet", 3)
+        evidence = _source_evidence()
+        result = SearchResult("https://example.com", "Title", "Snippet", 3, evidence)
         candidate = candidate_from_search_result(result)
         self.assertIs(candidate.source, CandidateSource.WEB_SEARCH)
         self.assertEqual((candidate.url, candidate.title, candidate.snippet),
                          (result.url, result.title, result.snippet))
         self.assertIsNone(candidate.final_url)
+        self.assertIs(candidate.identity_evidence, evidence)
 
 
 class SourceAttemptTests(unittest.TestCase):
@@ -397,6 +433,13 @@ class WebsiteCandidateTests(unittest.TestCase):
         with self.assertRaises(dataclasses.FrozenInstanceError):
             _candidate().url = "https://other.example/"
 
+    def test_identity_evidence_defaults_none_and_requires_exact_type(self) -> None:
+        self.assertIsNone(_candidate().identity_evidence)
+        evidence = _source_evidence()
+        self.assertIs(_candidate(identity_evidence=evidence).identity_evidence, evidence)
+        with self.assertRaises(TypeError):
+            _candidate(identity_evidence={"name_matches": True})
+
 
 class ProviderCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_orders_by_rank_stably_deduplicates_and_calls_once(self) -> None:
@@ -462,6 +505,198 @@ class ProviderCollectionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CandidateAssessmentTests(unittest.TestCase):
+    def test_exact_name_and_source_address_corroboration_are_official(self) -> None:
+        evidence = assess_website_candidate(
+            BusinessIdentity(
+                "Business Dental",
+                "City",
+                "Address Street 10",
+                "+380671234567",
+            ),
+            _candidate(
+                url="https://clinic-one.example/",
+                title="Business Dental",
+                identity_evidence=_source_evidence(),
+            ),
+        )
+        self.assertIs(evidence.kind, CandidateKind.OFFICIAL_WEBSITE)
+        self.assertEqual(
+            evidence.matched_signals,
+            (
+                MatchSignal.NAME_EXACT.value,
+                MatchSignal.SOURCE_ADDRESS_CORROBORATION.value,
+            ),
+        )
+        self.assertEqual(evidence.confidence, 0.65)
+
+    def test_exact_name_and_source_phone_corroboration_are_official(self) -> None:
+        evidence = assess_website_candidate(
+            BusinessIdentity("Business Dental", "City", phone="+380671234567"),
+            _candidate(
+                url="https://clinic-two.example/",
+                title="Business Dental",
+                identity_evidence=_source_evidence(
+                    address_matches=False,
+                    phone_matches=True,
+                )
+            ),
+        )
+        self.assertIs(evidence.kind, CandidateKind.OFFICIAL_WEBSITE)
+        self.assertEqual(
+            evidence.matched_signals,
+            (
+                MatchSignal.NAME_EXACT.value,
+                MatchSignal.SOURCE_PHONE_CORROBORATION.value,
+            ),
+        )
+        self.assertEqual(evidence.confidence, 0.65)
+
+    def test_token_overlap_and_source_corroboration_stay_below_threshold(self) -> None:
+        evidence = assess_website_candidate(
+            BusinessIdentity("Alpha Beta Gamma Delta", "City", "Main Street 10"),
+            _candidate(
+                url="https://unrelated.example/",
+                title="Alpha Beta Gamma",
+                identity_evidence=_source_evidence(),
+            ),
+        )
+        self.assertIs(evidence.kind, CandidateKind.UNKNOWN)
+        self.assertEqual(evidence.rejected_reason, "insufficient_identity_evidence")
+        self.assertEqual(evidence.confidence, 0.55)
+
+    def test_source_corroboration_cannot_replace_deterministic_name(self) -> None:
+        evidence = assess_website_candidate(
+            BusinessIdentity("Business Dental", "City", "Address Street 10"),
+            _candidate(
+                url="https://unrelated.example/",
+                title="Official clinic website",
+                identity_evidence=_source_evidence(),
+            ),
+        )
+        self.assertIs(evidence.kind, CandidateKind.UNKNOWN)
+        self.assertEqual(evidence.rejected_reason, "insufficient_identity_evidence")
+        self.assertNotIn(MatchSignal.NAME_EXACT.value, evidence.matched_signals)
+
+    def test_source_unbound_evidence_is_ignored(self) -> None:
+        cases = (
+            _source_evidence(
+                phone_matches=True,
+                candidate_url_source_bound=False,
+            ),
+            _source_evidence(
+                name_matches=False,
+                city_matches=False,
+                phone_matches=True,
+                different_city_detected=True,
+                candidate_url_source_bound=False,
+            ),
+        )
+        for source_evidence in cases:
+            with self.subTest(source_evidence=source_evidence):
+                evidence = assess_website_candidate(
+                    BusinessIdentity("Business Dental", "City", "Address Street 10"),
+                    _candidate(
+                        url="https://unrelated.example/",
+                        title="Business Dental",
+                        identity_evidence=source_evidence,
+                    ),
+                )
+                self.assertIs(evidence.kind, CandidateKind.UNKNOWN)
+                self.assertEqual(
+                    evidence.matched_signals,
+                    (MatchSignal.NAME_EXACT.value,),
+                )
+
+    def test_negative_bound_source_identity_fails_closed(self) -> None:
+        cases = (
+            {"name_matches": False},
+            {"city_matches": False},
+            {"different_city_detected": True},
+        )
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                evidence = assess_website_candidate(
+                    BusinessIdentity("Business Dental", "City", "Address Street 10"),
+                    _candidate(
+                        url="https://unrelated.example/",
+                        title="Business Dental",
+                        identity_evidence=_source_evidence(**overrides),
+                    ),
+                )
+                self.assertIs(evidence.kind, CandidateKind.UNKNOWN)
+                self.assertEqual(
+                    evidence.rejected_reason,
+                    "conflicting_source_identity_evidence",
+                )
+
+    def test_observed_phone_conflict_overrides_source_phone_match(self) -> None:
+        evidence = assess_website_candidate(
+            BusinessIdentity("Business Dental", "City", phone="+380671234567"),
+            _candidate(
+                url="https://unrelated.example/",
+                title="Business Dental +380501112233",
+                identity_evidence=_source_evidence(
+                    address_matches=False,
+                    phone_matches=True,
+                ),
+            ),
+        )
+        self.assertEqual(evidence.rejected_reason, "conflicting_phone")
+        self.assertEqual(evidence.matched_signals, ())
+
+    def test_explicit_city_conflict_overrides_source_city_match(self) -> None:
+        evidence = assess_website_candidate(
+            BusinessIdentity("Business Dental", "City", "Address Street 10"),
+            _candidate(
+                url="https://unrelated.example/",
+                title="Business Dental",
+                city="Other City",
+                identity_evidence=_source_evidence(),
+            ),
+        )
+        self.assertEqual(evidence.rejected_reason, "conflicting_city")
+        self.assertEqual(evidence.matched_signals, ())
+
+    def test_source_fields_require_corresponding_request_identity(self) -> None:
+        cases = (
+            (
+                BusinessIdentity("Business Dental", "City", phone="+380671234567"),
+                _source_evidence(address_matches=True, phone_matches=False),
+                MatchSignal.SOURCE_ADDRESS_CORROBORATION,
+            ),
+            (
+                BusinessIdentity("Business Dental", "City", "Address Street 10"),
+                _source_evidence(address_matches=False, phone_matches=True),
+                MatchSignal.SOURCE_PHONE_CORROBORATION,
+            ),
+        )
+        for identity, source_evidence, absent_signal in cases:
+            with self.subTest(absent_signal=absent_signal):
+                evidence = assess_website_candidate(
+                    identity,
+                    _candidate(
+                        url="https://unrelated.example/",
+                        title="Business Dental",
+                        identity_evidence=source_evidence,
+                    ),
+                )
+                self.assertIs(evidence.kind, CandidateKind.UNKNOWN)
+                self.assertNotIn(absent_signal.value, evidence.matched_signals)
+
+    def test_exact_extracted_phone_and_legacy_behavior_are_unchanged(self) -> None:
+        phone_evidence = assess_website_candidate(
+            BusinessIdentity("Business Dental", "City", phone="+380671234567"),
+            _candidate(url="https://unrelated.example/", contact_phones=("0671234567",)),
+        )
+        legacy_evidence = assess_website_candidate(
+            BusinessIdentity("Business Dental", "City", "Address Street 10"),
+            _candidate(url="https://unrelated.example/", title="Business Dental"),
+        )
+        self.assertIs(phone_evidence.kind, CandidateKind.OFFICIAL_WEBSITE)
+        self.assertEqual(phone_evidence.confidence, 0.75)
+        self.assertIs(legacy_evidence.kind, CandidateKind.UNKNOWN)
+        self.assertEqual(legacy_evidence.confidence, 0.35)
+
     def test_maps_and_search_exact_phone_are_official(self) -> None:
         for source in (CandidateSource.MAPS, CandidateSource.WEB_SEARCH):
             with self.subTest(source=source):
@@ -742,6 +977,31 @@ class ResolutionAssemblyTests(unittest.TestCase):
         self.assertIs(resolution.status, ResolutionStatus.UNCERTAIN)
         self.assertIsNone(resolution.resolved_url)
         self.assertEqual(resolution.confidence, 0.75)
+
+    def test_competing_source_corroborated_domains_remain_uncertain(self) -> None:
+        identity = BusinessIdentity(
+            "Business Dental",
+            "City",
+            "Address Street 10",
+        )
+        candidates = (
+            _candidate(
+                url="https://clinic-one.example/",
+                title="Business Dental",
+                identity_evidence=_source_evidence(),
+            ),
+            _candidate(
+                url="https://clinic-two.example/",
+                title="Business Dental",
+                identity_evidence=_source_evidence(),
+            ),
+        )
+        resolution = resolve_website_candidates(
+            identity, candidates, self.completed, self.required
+        )
+        self.assertIs(resolution.status, ResolutionStatus.UNCERTAIN)
+        self.assertIsNone(resolution.resolved_url)
+        self.assertEqual(resolution.confidence, 0.65)
 
     def test_strong_candidate_wins_despite_other_source_failure(self) -> None:
         resolution = resolve_website_candidates(
