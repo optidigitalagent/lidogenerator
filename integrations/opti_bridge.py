@@ -38,12 +38,13 @@ async def finalize_completed_task(task_id: int) -> str:
     if task_row is None:
         return "Opti sync pending — /sync"
     task = dict(task_row)
-    businesses = db.get_businesses_for_bridge(task_id)
     if (
         task.get("status") != "done"
         or task.get("opti_sync_contract_version") != SCHEMA_VERSION
-        or not businesses
     ):
+        return ""
+    businesses = db.get_businesses_for_bridge(task_id)
+    if not businesses:
         return ""
     try:
         payload = build_payload(task, businesses)

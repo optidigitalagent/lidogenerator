@@ -11,6 +11,30 @@ from integrations.opti_bridge import finalize_completed_task
 from models import Business
 
 
+class BridgeEligibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ineligible_legacy_task_does_not_read_businesses(self):
+        task = {"niche": "test", "city": "test", "count": 50}
+        with patch.object(db, "get_task", return_value=task), patch.object(
+            db, "get_businesses_for_bridge"
+        ) as get_businesses:
+            self.assertEqual("", await finalize_completed_task(1))
+        get_businesses.assert_not_called()
+
+    async def test_done_task_without_bridge_marker_does_not_read_businesses(self):
+        task = {
+            "status": "done",
+            "opti_sync_contract_version": None,
+            "niche": "test",
+            "city": "test",
+            "count": 50,
+        }
+        with patch.object(db, "get_task", return_value=task), patch.object(
+            db, "get_businesses_for_bridge"
+        ) as get_businesses:
+            self.assertEqual("", await finalize_completed_task(1))
+        get_businesses.assert_not_called()
+
+
 class BridgeFinalizationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
