@@ -34,7 +34,7 @@ from telegram.ext import (
 import config
 import db
 import orchestrator
-from integrations import opti_outbox
+from integrations import opti_bridge, opti_outbox
 
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s: %(message)s", level=logging.INFO
@@ -313,17 +313,26 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         await deny(update)
         return
+    reconciled = opti_bridge.reconcile_completed_tasks(limit=100)
     retried = opti_outbox.retry_failed()
     await opti_outbox.deliver_due(limit=10)
     prefix = "Opti bridge is disabled. " if not config.OPTI_BRIDGE_ENABLED else ""
     suffix = f"; manually retried {retried}" if retried else ""
-    await update.message.reply_text(prefix + opti_outbox.format_summary() + suffix)
+    recovery = (
+        f"; recovered {reconciled['enqueued']} completed"
+        if reconciled["enqueued"]
+        else ""
+    )
+    await update.message.reply_text(
+        prefix + opti_outbox.format_summary() + recovery + suffix
+    )
 
 
 async def _start_outbox_worker(application: Application) -> None:
     del application
     # After a process restart no prior in-process sender can still own a row.
     opti_outbox.recover_stale_sending(stale_after_seconds=0)
+    opti_bridge.reconcile_completed_tasks(limit=100)
     OUTBOX_WORKER.start()
 
 

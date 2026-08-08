@@ -1,7 +1,9 @@
 import asyncio
+import concurrent.futures
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -169,6 +171,70 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.assertEqual("RETRY", opti_outbox.get_by_batch("batch-1")["status"])
+
+    def test_two_connections_concurrently_claim_one_row_once(self):
+        opti_outbox.enqueue(make_payload(), now=NOW)
+        barrier = threading.Barrier(2)
+
+        def claim():
+            barrier.wait()
+            return opti_outbox._claim_due(now=NOW)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            rows = list(executor.map(lambda _index: claim(), range(2)))
+        claimed = [row for row in rows if row is not None]
+        self.assertEqual(1, len(claimed))
+        self.assertEqual(1, claimed[0]["attempts"])
+        self.assertEqual(1, opti_outbox.get_by_batch("batch-1")["attempts"])
+
+    def test_two_connections_concurrently_claim_distinct_rows(self):
+        opti_outbox.enqueue(make_payload("batch-1"), now=NOW)
+        opti_outbox.enqueue(make_payload("batch-2"), now=NOW)
+        barrier = threading.Barrier(2)
+
+        def claim():
+            barrier.wait()
+            return opti_outbox._claim_due(now=NOW)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            rows = list(executor.map(lambda _index: claim(), range(2)))
+        self.assertNotIn(None, rows)
+        self.assertEqual(2, len({row["id"] for row in rows}))
+        self.assertEqual([1, 1], sorted(row["attempts"] for row in rows))
+
+    async def test_worker_and_manual_delivery_cannot_send_one_row_twice(self):
+        payload = make_payload()
+        opti_outbox.enqueue(payload, now=NOW)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class BlockingClient:
+            def __init__(self):
+                self.calls = 0
+
+            async def import_batch(self, payload_bytes, key):
+                del payload_bytes, key
+                self.calls += 1
+                started.set()
+                await release.wait()
+                return validate_response(success_response(payload))
+
+        client = BlockingClient()
+        with patch.object(config, "OPTI_BRIDGE_ENABLED", True):
+            worker_delivery = asyncio.create_task(
+                opti_outbox.deliver_due(
+                    now=NOW, limit=1, client_factory=lambda: client
+                )
+            )
+            await started.wait()
+            manual_result = await opti_outbox.deliver_due(
+                now=NOW, limit=1, client_factory=lambda: client
+            )
+            release.set()
+            worker_result = await worker_delivery
+        self.assertEqual(1, worker_result)
+        self.assertEqual(0, manual_result)
+        self.assertEqual(1, client.calls)
 
     async def test_max_attempts_and_bounded_backoff(self):
         opti_outbox.enqueue(make_payload(), now=NOW)

@@ -165,25 +165,21 @@ def _claim_due(
             clauses.append("externalBatchId = ?")
             parameters.append(external_batch_id)
         row = conn.execute(
-            f"SELECT * FROM opti_sync_outbox WHERE {' AND '.join(clauses)} ORDER BY id LIMIT 1",
-            parameters,
-        ).fetchone()
-        if row is None:
-            return None
-        cursor = conn.execute(
-            """
+            f"""
             UPDATE opti_sync_outbox
             SET status = 'SENDING', attempts = attempts + 1, updatedAt = ?
-            WHERE id = ? AND status IN ('PENDING', 'RETRY')
+            WHERE id = (
+                SELECT id FROM opti_sync_outbox
+                WHERE {' AND '.join(clauses)}
+                ORDER BY id
+                LIMIT 1
+            )
+              AND status IN ('PENDING', 'RETRY')
+            RETURNING *
             """,
-            (timestamp, row["id"]),
-        )
-        if cursor.rowcount != 1:
-            return None
-        claimed = conn.execute(
-            "SELECT * FROM opti_sync_outbox WHERE id = ?", (row["id"],)
+            [timestamp, *parameters],
         ).fetchone()
-        return dict(claimed)
+        return dict(row) if row is not None else None
 
 
 def _mark_success(row_id: int, response: Mapping[str, Any], *, now: datetime | None = None) -> None:

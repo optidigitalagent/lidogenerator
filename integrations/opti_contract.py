@@ -75,17 +75,88 @@ def normalize_website_domain(value: Any) -> str:
         return host
 
 
-def normalize_google_maps_url(value: Any) -> str:
+def canonical_http_url(value: Any) -> str | None:
+    """Return a deterministic HTTP(S) URL without performing network I/O."""
     raw = _text(value)
     if not raw:
+        return None
+    candidate = raw
+    if candidate.startswith("//"):
+        candidate = f"https:{candidate}"
+    elif "://" not in candidate:
+        candidate = f"https://{candidate}"
+    try:
+        parsed = urlsplit(candidate)
+        scheme = parsed.scheme.casefold()
+        hostname = parsed.hostname
+        port = parsed.port
+    except (TypeError, ValueError):
+        return None
+    if scheme not in {"http", "https"} or not hostname:
+        return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    if any(character.isspace() for character in hostname):
+        return None
+    try:
+        normalized_host = hostname.casefold().rstrip(".").encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+    if not normalized_host:
+        return None
+    netloc_host = f"[{normalized_host}]" if ":" in normalized_host else normalized_host
+    default_port = (scheme == "http" and port == 80) or (
+        scheme == "https" and port == 443
+    )
+    netloc = (
+        f"{netloc_host}:{port}"
+        if port is not None and not default_port
+        else netloc_host
+    )
+    return urlunsplit((scheme, netloc, parsed.path, parsed.query, ""))
+
+
+def canonical_instagram_url(value: Any) -> str | None:
+    """Canonicalize a handle or Instagram URL to one HTTPS profile form."""
+    raw = _text(value)
+    if not raw:
+        return None
+    direct = raw.lstrip("@")
+    if re.fullmatch(r"[A-Za-z0-9._]{1,30}", direct):
+        handle = direct
+    else:
+        canonical = canonical_http_url(raw)
+        if canonical is None:
+            return None
+        parsed = urlsplit(canonical)
+        if (parsed.hostname or "").casefold().removeprefix("www.") != "instagram.com":
+            return None
+        handle = parsed.path.strip("/").split("/", 1)[0].lstrip("@")
+    if not re.fullmatch(r"[A-Za-z0-9._]{1,30}", handle):
+        return None
+    return f"https://www.instagram.com/{handle.casefold()}/"
+
+
+def normalize_google_maps_url(value: Any) -> str:
+    canonical = canonical_http_url(value)
+    if canonical is None:
         return ""
-    parsed = urlsplit(raw if "://" in raw else f"https://{raw}")
+    parsed = urlsplit(canonical)
     host = (parsed.hostname or "").casefold().rstrip(".")
-    if parsed.port:
+    if parsed.port and not (
+        (parsed.scheme.casefold() == "http" and parsed.port == 80)
+        or (parsed.scheme.casefold() == "https" and parsed.port == 443)
+    ):
         host = f"{host}:{parsed.port}"
     path = re.sub(r"/{2,}", "/", parsed.path).rstrip("/") or "/"
-    ignored = {"hl", "authuser", "entry", "g_ep", "utm_source", "utm_medium", "utm_campaign"}
-    query = urlencode(sorted((k, v) for k, v in parse_qsl(parsed.query) if k not in ignored))
+    ignored = {"hl", "authuser", "entry", "g_ep"}
+    query = urlencode(
+        sorted(
+            (key, item)
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+            if key.casefold() not in ignored and not key.casefold().startswith("utm_")
+        )
+    ).replace("~", "%7E")
     return urlunsplit(((parsed.scheme or "https").casefold(), host, path, query, ""))
 
 
@@ -171,7 +242,9 @@ def _website_assessment(business: Business, checked_at: str) -> dict[str, Any]:
         "hasSite": bool(business.has_site),
         "siteQuality": quality,
         "checkedAt": checked_at,
-        "finalUrl": _nullable(business.website_final_url or business.effective_website_url),
+        "finalUrl": canonical_http_url(
+            business.website_final_url or business.effective_website_url
+        ),
     }
 
 
@@ -183,7 +256,7 @@ def build_payload(
     batch_status: str = "COMPLETED",
 ) -> dict[str, Any]:
     leads = list(businesses)
-    generated = _iso_utc("", generated_at)
+    generated = _iso_utc(task.get("finished_at"), generated_at)
     completed = _iso_utc(task.get("finished_at"), generated_at)
     items = []
     for rank, business in enumerate(leads, start=1):
@@ -200,9 +273,11 @@ def build_payload(
                 "address": _nullable(business.address),
                 "phone": _nullable(business.phone),
                 "email": _nullable(business.email),
-                "instagramUrl": _nullable(business.instagram_url),
-                "websiteUrl": _nullable(business.effective_website_url),
-                "googleMapsUrl": _nullable(normalize_google_maps_url(business.google_maps_url)),
+                "instagramUrl": canonical_instagram_url(business.instagram_url),
+                "websiteUrl": canonical_http_url(business.effective_website_url),
+                "googleMapsUrl": canonical_http_url(
+                    normalize_google_maps_url(business.google_maps_url)
+                ),
                 "googlePlaceId": _nullable(place_id),
                 "rating": business.rating if business.rating else None,
                 "reviewCount": business.reviews_count if business.reviews_count >= 0 else None,
@@ -251,6 +326,27 @@ def _valid_time(value: Any, name: str, *, nullable: bool = False) -> None:
         raise ContractError(f"{name} must be ISO-8601") from error
     if parsed.tzinfo is None:
         raise ContractError(f"{name} must include a UTC offset")
+
+
+def _bounded_http_url(value: Any, name: str, *, nullable: bool = False) -> None:
+    if value is None and nullable:
+        return
+    _bounded_string(value, name, 2000)
+    try:
+        parsed = urlsplit(value)
+        scheme = parsed.scheme.casefold()
+        hostname = parsed.hostname
+        parsed.port
+    except (TypeError, ValueError) as error:
+        raise ContractError(f"{name} must be a valid HTTP(S) URL") from error
+    if (
+        scheme not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or any(character.isspace() for character in hostname)
+    ):
+        raise ContractError(f"{name} must be a valid HTTP(S) URL")
 
 
 def validate_payload(payload: Mapping[str, Any]) -> None:
@@ -312,7 +408,7 @@ def validate_payload(payload: Mapping[str, Any]) -> None:
         for field in ("phone", "email"):
             _bounded_string(lead.get(field), f"{prefix}.{field}", 320, nullable=True)
         for field in ("instagramUrl", "websiteUrl", "googleMapsUrl"):
-            _bounded_string(lead.get(field), f"{prefix}.{field}", 2000, nullable=True)
+            _bounded_http_url(lead.get(field), f"{prefix}.{field}", nullable=True)
         _bounded_string(lead.get("googlePlaceId"), f"{prefix}.googlePlaceId", 500, nullable=True)
         rating = lead.get("rating")
         if rating is not None and (
@@ -336,8 +432,10 @@ def validate_payload(payload: Mapping[str, Any]) -> None:
         if assessment.get("siteQuality") not in SITE_QUALITIES:
             raise ContractError(f"{prefix}.websiteAssessment.siteQuality is invalid")
         _valid_time(assessment.get("checkedAt"), f"{prefix}.websiteAssessment.checkedAt")
-        _bounded_string(
-            assessment.get("finalUrl"), f"{prefix}.websiteAssessment.finalUrl", 2000, nullable=True
+        _bounded_http_url(
+            assessment.get("finalUrl"),
+            f"{prefix}.websiteAssessment.finalUrl",
+            nullable=True,
         )
         _valid_time(lead.get("collectedAt"), f"{prefix}.collectedAt", nullable=True)
 

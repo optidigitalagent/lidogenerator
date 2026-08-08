@@ -81,13 +81,40 @@ class SyncCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(config, "ALLOWED_USER_IDS", {11}), patch.object(
             config, "OPTI_IMPORT_TOKEN", "super-secret"
-        ), patch.object(bot.opti_outbox, "retry_failed", return_value=0), patch.object(
+        ), patch.object(
+            bot.opti_bridge,
+            "reconcile_completed_tasks",
+            return_value={"examined": 0, "enqueued": 0, "errors": 0},
+        ) as reconcile, patch.object(
+            bot.opti_outbox, "retry_failed", return_value=0
+        ), patch.object(
             bot.opti_outbox, "deliver_due", AsyncMock(return_value=0)
         ), patch.object(
             bot.opti_outbox, "format_summary", return_value="Opti sync: pending 1"
         ):
             await bot.cmd_sync(update, SimpleNamespace())
+        reconcile.assert_called_once_with(limit=100)
         text = update.message.reply_text.await_args.args[0]
         self.assertIn("pending 1", text)
         self.assertNotIn("super-secret", text)
         self.assertNotIn("payload", text.casefold())
+
+    async def test_post_init_recovers_then_reconciles_before_starting_worker(self):
+        import bot
+
+        calls = []
+        with patch.object(
+            bot.opti_outbox,
+            "recover_stale_sending",
+            side_effect=lambda **_kwargs: calls.append("recover"),
+        ), patch.object(
+            bot.opti_bridge,
+            "reconcile_completed_tasks",
+            side_effect=lambda **_kwargs: calls.append("reconcile"),
+        ), patch.object(
+            bot.OUTBOX_WORKER,
+            "start",
+            side_effect=lambda: calls.append("start"),
+        ):
+            await bot._start_outbox_worker(SimpleNamespace())
+        self.assertEqual(["recover", "reconcile", "start"], calls)

@@ -3,13 +3,33 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 
 import db
 from integrations import opti_outbox
-from integrations.opti_contract import build_payload
+from integrations.opti_contract import SCHEMA_VERSION, build_payload
 
 log = logging.getLogger("lead_hunter.opti_bridge")
+
+
+def reconcile_completed_tasks(limit: int = 100) -> dict[str, int]:
+    """Enqueue missing eligible completed tasks without making HTTP calls."""
+    summary = {"examined": 0, "enqueued": 0, "errors": 0}
+    for task_row in db.get_completed_tasks_for_opti_reconciliation(limit=limit):
+        summary["examined"] += 1
+        task = dict(task_row)
+        try:
+            businesses = db.get_businesses_for_bridge(task["id"])
+            payload = build_payload(task, businesses)
+            opti_outbox.enqueue(payload)
+            summary["enqueued"] += 1
+        except Exception as error:
+            summary["errors"] += 1
+            log.warning(
+                "Opti reconciliation skipped task %s after %s",
+                task.get("id"),
+                type(error).__name__,
+            )
+    return summary
 
 
 async def finalize_completed_task(task_id: int) -> str:
@@ -19,14 +39,14 @@ async def finalize_completed_task(task_id: int) -> str:
         return "Opti sync pending — /sync"
     task = dict(task_row)
     businesses = db.get_businesses_for_bridge(task_id)
-    if task.get("status") != "done" or not businesses:
+    if (
+        task.get("status") != "done"
+        or task.get("opti_sync_contract_version") != SCHEMA_VERSION
+        or not businesses
+    ):
         return ""
     try:
-        payload = build_payload(
-            task,
-            businesses,
-            generated_at=datetime.now(timezone.utc),
-        )
+        payload = build_payload(task, businesses)
         opti_outbox.enqueue(payload)
         await opti_outbox.deliver_due(external_batch_id=payload["externalBatchId"], limit=1)
         row = opti_outbox.get_by_batch(payload["externalBatchId"])

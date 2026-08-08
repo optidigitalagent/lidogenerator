@@ -11,6 +11,8 @@ from typing import Iterator, List, Optional
 import config
 from models import Business
 
+OPTI_SYNC_CONTRACT_VERSION = "opti.lead-import.v1"
+
 
 @contextmanager
 def _connect() -> Iterator[sqlite3.Connection]:
@@ -39,7 +41,8 @@ def init_db() -> None:
                 csv_path    TEXT,                          -- путь к готовому CSV
                 created_at  TEXT NOT NULL,
                 finished_at TEXT,
-                external_batch_id TEXT
+                external_batch_id TEXT,
+                opti_sync_contract_version TEXT
             );
 
             CREATE TABLE IF NOT EXISTS businesses (
@@ -161,6 +164,8 @@ def _migrate_tasks(conn: sqlite3.Connection) -> None:
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
     if "external_batch_id" not in existing:
         conn.execute("ALTER TABLE tasks ADD COLUMN external_batch_id TEXT")
+    if "opti_sync_contract_version" not in existing:
+        conn.execute("ALTER TABLE tasks ADD COLUMN opti_sync_contract_version TEXT")
     rows = conn.execute(
         "SELECT id, created_at FROM tasks WHERE external_batch_id IS NULL"
     ).fetchall()
@@ -193,8 +198,9 @@ def create_task(niche: str, city: str, count: int, chat_id: Optional[int] = None
     """Создать задачу поиска, вернуть её id."""
     with _connect() as conn:
         cur = conn.execute(
-            "INSERT INTO tasks (niche, city, count, status, chat_id, created_at, external_batch_id) "
-            "VALUES (?, ?, ?, 'new', ?, ?, ?)",
+            "INSERT INTO tasks (niche, city, count, status, chat_id, created_at, "
+            "external_batch_id, opti_sync_contract_version) "
+            "VALUES (?, ?, ?, 'new', ?, ?, ?, ?)",
             (
                 niche,
                 city,
@@ -204,6 +210,7 @@ def create_task(niche: str, city: str, count: int, chat_id: Optional[int] = None
                 .isoformat(timespec="seconds")
                 .replace("+00:00", "Z"),
                 str(uuid.uuid4()),
+                OPTI_SYNC_CONTRACT_VERSION,
             ),
         )
         return cur.lastrowid
@@ -242,6 +249,30 @@ def get_last_task(chat_id: Optional[int] = None) -> Optional[sqlite3.Row]:
                 (chat_id,),
             ).fetchone()
         return conn.execute("SELECT * FROM tasks ORDER BY id DESC LIMIT 1").fetchone()
+
+
+def get_completed_tasks_for_opti_reconciliation(limit: int = 100) -> List[sqlite3.Row]:
+    """Return eligible completed tasks that do not yet have a durable outbox row."""
+    bounded_limit = max(0, min(int(limit), 1000))
+    with _connect() as conn:
+        return conn.execute(
+            """
+            SELECT tasks.*
+            FROM tasks
+            WHERE tasks.status = 'done'
+              AND tasks.opti_sync_contract_version = ?
+              AND EXISTS (
+                  SELECT 1 FROM businesses WHERE businesses.task_id = tasks.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM opti_sync_outbox
+                  WHERE opti_sync_outbox.externalBatchId = tasks.external_batch_id
+              )
+            ORDER BY tasks.id ASC
+            LIMIT ?
+            """,
+            (OPTI_SYNC_CONTRACT_VERSION, bounded_limit),
+        ).fetchall()
 
 
 # ---------- Бизнесы ----------

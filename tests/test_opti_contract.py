@@ -12,6 +12,8 @@ import db
 from integrations.opti_contract import (
     ContractError,
     build_payload,
+    canonical_http_url,
+    canonical_instagram_url,
     normalize_google_maps_url,
     normalize_instagram_handle,
     normalize_phone,
@@ -72,6 +74,17 @@ class OptiIdentityTests(unittest.TestCase):
         two = "https://www.google.com/maps/place/A"
         self.assertEqual(normalize_google_maps_url(one), normalize_google_maps_url(two))
 
+    def test_maps_url_normalization_matches_opti_query_semantics(self):
+        value = (
+            "HTTPS://WWW.Google.com:443/maps//place/Example/"
+            "?utm_source=a&hl=en&empty=&flag&b=2&a=1&a=0&x=~#result"
+        )
+        self.assertEqual(
+            "https://www.google.com/maps/place/Example"
+            "?a=0&a=1&b=2&empty=&flag=&x=%7E",
+            normalize_google_maps_url(value),
+        )
+
     def test_phone_normalization(self):
         self.assertEqual("+380441234567", normalize_phone("+38 (044) 123-45-67"))
 
@@ -80,6 +93,22 @@ class OptiIdentityTests(unittest.TestCase):
 
     def test_website_domain_normalization(self):
         self.assertEqual("example.com", normalize_website_domain("HTTPS://WWW.Example.com/path"))
+
+    def test_instagram_inputs_use_one_canonical_https_form(self):
+        expected = "https://www.instagram.com/belladent/"
+        self.assertEqual(expected, canonical_instagram_url("@BellaDent"))
+        self.assertEqual(expected, canonical_instagram_url("instagram.com/BellaDent"))
+        self.assertEqual(
+            expected,
+            canonical_instagram_url(
+                "http://www.instagram.com/BellaDent/?utm_source=test#profile"
+            ),
+        )
+
+    def test_bare_http_url_is_canonicalized_and_non_http_is_rejected(self):
+        self.assertEqual("https://example.com/path", canonical_http_url("example.com/path"))
+        self.assertIsNone(canonical_http_url("ftp://example.com/file"))
+        self.assertIsNone(canonical_http_url("https://user:secret@example.com"))
 
     def test_identity_fallback_bases(self):
         cases = (
@@ -127,6 +156,44 @@ class OptiPayloadTests(unittest.TestCase):
         self.assertIsNone(payload["leads"][0]["email"])
         self.assertIsNone(payload["leads"][0]["websiteUrl"])
 
+    def test_build_boundary_canonicalizes_or_drops_source_urls(self):
+        payload = build_payload(
+            task(),
+            [
+                business(
+                    instagram_url="BellaDent",
+                    website="example.com/site",
+                    google_maps_url="ftp://maps.example/place",
+                    website_final_url="example.com/final",
+                )
+            ],
+            generated_at=NOW,
+        )
+        lead = payload["leads"][0]
+        self.assertEqual("https://www.instagram.com/belladent/", lead["instagramUrl"])
+        self.assertEqual("https://example.com/site", lead["websiteUrl"])
+        self.assertIsNone(lead["googleMapsUrl"])
+        self.assertEqual(
+            "https://example.com/final", lead["websiteAssessment"]["finalUrl"]
+        )
+
+    def test_invalid_url_cannot_serialize(self):
+        payload = build_payload(task(), [business()], generated_at=NOW)
+        invalid_values = (
+            ("instagramUrl", "@not-a-url"),
+            ("websiteUrl", "ftp://example.com"),
+            ("googleMapsUrl", "data:text/plain,no"),
+        )
+        for field, value in invalid_values:
+            changed = copy.deepcopy(payload)
+            changed["leads"][0][field] = value
+            with self.subTest(field=field), self.assertRaises(ContractError):
+                serialize_payload(changed)
+        changed = copy.deepcopy(payload)
+        changed["leads"][0]["websiteAssessment"]["finalUrl"] = "ftp://example.com"
+        with self.assertRaises(ContractError):
+            serialize_payload(changed)
+
     def test_payload_bounds(self):
         payload = build_payload(task(), [business()], generated_at=NOW)
         too_long = copy.deepcopy(payload)
@@ -161,6 +228,16 @@ class OptiPayloadTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertNotIn(b"secret-token", first)
         self.assertNotIn("OPTI_IMPORT_TOKEN", payload)
+
+    def test_completed_task_payload_ignores_later_wall_clock_fallbacks(self):
+        first = build_payload(task(), [business()], generated_at=NOW)
+        later = build_payload(
+            task(),
+            [business()],
+            generated_at=datetime(2027, 1, 1, tzinfo=timezone.utc),
+        )
+        self.assertEqual("2026-08-08T10:00:00Z", first["generatedAt"])
+        self.assertEqual(serialize_payload(first), serialize_payload(later))
 
     def test_only_persisted_final_businesses_are_used(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
