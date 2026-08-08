@@ -15,6 +15,7 @@ from website_candidate_matching import (
     ProviderUnavailable,
     SearchProvider,
     SearchProviderError,
+    SearchIdentityEvidence,
     SearchRequest,
     SearchResult,
 )
@@ -184,6 +185,35 @@ def _bounded_value(value: str, limit: int) -> str:
     return cleaned if len(cleaned) <= limit else cleaned[:limit].rstrip()
 
 
+def _suggested_query_variants(
+    name: str,
+    city: str,
+    address: str | None,
+    phone: str | None,
+) -> tuple[str, ...]:
+    if phone is not None and address is not None:
+        candidates = (
+            f'"{name}" "{phone}"',
+            f'"{name}" "{city}" "{address}"',
+            f'"{name}" "{city}"',
+        )
+    elif phone is not None:
+        candidates = (
+            f'"{name}" "{phone}"',
+            f'"{phone}" "{city}"',
+            f'"{name}" "{city}"',
+        )
+    elif address is not None:
+        candidates = (
+            f'"{name}" "{city}" "{address}"',
+            f'"{name}" "{city}"',
+            f'"{address}" "{name}"',
+        )
+    else:
+        candidates = (f'"{name}" "{city}"',)
+    return tuple(dict.fromkeys(candidates))[:3]
+
+
 def build_openai_web_search_input(request: SearchRequest) -> str:
     """Build a deterministic privacy-bounded official-site lookup prompt."""
 
@@ -192,28 +222,49 @@ def build_openai_web_search_input(request: SearchRequest) -> str:
     name = _bounded_value(request.business_name, 100)
     city = _bounded_value(request.city, 80)
     address = _bounded_value(request.address, 120) if request.address is not None else None
+    phone = _bounded_value(request.phone, 32) if request.phone is not None else None
     identity_lines = [
         f"Business name: {name}",
         f"City: {city}",
     ]
     if address is not None:
         identity_lines.append(f"Address: {address}")
-    if request.phone is not None:
-        identity_lines.append(f"Phone: {_bounded_value(request.phone, 32)}")
+    if phone is not None:
+        identity_lines.append(f"Phone: {phone}")
     identity_lines.append(f"Maximum candidates: {request.max_results}")
-    query_variants = [
-        f'1. "{name}" "{city}"' + (f' "{address}"' if address else ""),
-        f'2. "{name}" "{city}"',
-    ]
-    if address is not None:
-        query_variants.append(f'3. "{address}" "{name}"')
+    query_variants = tuple(
+        f"{index}. {variant}"
+        for index, variant in enumerate(
+            _suggested_query_variants(name, city, address, phone),
+            start=1,
+        )
+    )
+    if address is not None and phone is not None:
+        corroboration = (
+            "When an address is supplied, exact address evidence is preferred. "
+            "Exact phone evidence may substitute for address evidence only when "
+            "source evidence clearly associates that phone with the same named "
+            "business in the same city. If address and phone corroboration are "
+            "both absent or false, return an empty results array. "
+        )
+    elif address is not None:
+        corroboration = (
+            "When an address is supplied without a phone, source evidence must "
+            "match that address; otherwise return an empty results array. "
+        )
+    elif phone is not None:
+        corroboration = (
+            "When a phone is supplied without an address, source evidence must "
+            "match that exact phone; otherwise return an empty results array. "
+        )
+    else:
+        corroboration = ""
     instructions = (
         "All identity fields describe one exact business. A same-name business in "
-        "any other city is not a candidate. City must match exactly in meaning. "
-        "When an address is supplied, source evidence must match that address. Do "
-        "not infer ownership from the name alone. If source evidence supports Kyiv "
-        f"or any city other than {city}, reject it. If exact city/address evidence "
-        "is absent, return an empty results array; do not return a best guess. "
+        "any other city is not a candidate. Name and city must both match, and city "
+        "must match exactly in meaning. Different city evidence requires rejection. "
+        + corroboration
+        + "Do not infer ownership from the name alone. Do not return a best guess. "
         "Perform one search action only. Do not use open_page or find_in_page. Put "
         "multiple focused queries into that one search action if needed. Return only "
         "business-owned websites; exclude social media, Maps, directories, "
@@ -534,6 +585,14 @@ class OpenAIWebSearchProvider(SearchProvider):
                 item["title"][:_TITLE_LIMIT],
                 item["snippet"][:_SNIPPET_LIMIT],
                 len(results) + 1,
+                SearchIdentityEvidence(
+                    name_matches=item["name_matches"],
+                    city_matches=item["city_matches"],
+                    address_matches=item["address_matches"],
+                    phone_matches=item["phone_matches"],
+                    different_city_detected=item["different_city_detected"],
+                    candidate_url_source_bound=True,
+                ),
             ))
             if len(results) >= count:
                 break
