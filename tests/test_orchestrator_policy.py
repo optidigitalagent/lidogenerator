@@ -192,7 +192,7 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run["resolver_calls"], [])
         self.assertEqual(run["events"], ["site"])
 
-    async def test_shadow_resolves_before_audit_and_passes_provider(self) -> None:
+    async def test_shadow_audits_before_isolated_resolution_and_passes_provider(self) -> None:
         provider = object()
         business = _lead("one")
         run = await self._run(
@@ -203,8 +203,9 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
             website_search_provider=provider,
             resolver_setup=lambda item: setattr(item, "website_resolution_status", "uncertain"),
         )
-        self.assertEqual(run["events"][:2], ["resolver", "site"])
+        self.assertEqual(run["events"][:2], ["site", "resolver"])
         self.assertIs(run["resolver_calls"][0][1], provider)
+        self.assertIsNot(run["resolver_calls"][0][0][0], business)
         self.assertEqual(business.lead_decision, "")
 
     async def test_strict_qualification_matrix_is_fail_closed(self) -> None:
