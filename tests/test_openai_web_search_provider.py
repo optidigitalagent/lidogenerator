@@ -7,6 +7,7 @@ import io
 import json
 import math
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -260,22 +261,15 @@ class InputBuilderTests(unittest.TestCase):
                 self.assertLessEqual(len(variants), 3)
                 self.assertEqual(len(variants), len(set(variants)))
 
-    def test_prompt_has_no_v1_expected_domain_leakage(self):
+    def test_prompt_does_not_emit_unrequested_domain_literals(self):
         prompt = build_openai_web_search_input(SearchRequest(
             "Generic Business", "Generic City", "Generic Address", "1234567"
         ))
-        for domain in (
-            "status-dent.zp.ua",
-            "kora.ua",
-            "flowerkiss.com.ua",
-            "mircvetov.zp.ua",
-            "alidente.com.ua",
-            "illidental.com",
-            "milkbar.ua",
-            "hobby.zp.ua",
-        ):
-            with self.subTest(domain=domain):
-                self.assertNotIn(domain, prompt)
+        domain_tokens = re.findall(
+            r"\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\b",
+            prompt,
+        )
+        self.assertEqual(domain_tokens, [])
 
     def test_prompt_semantics_match_address_or_exact_phone_prefilter(self):
         prompt = build_openai_web_search_input(SearchRequest(
