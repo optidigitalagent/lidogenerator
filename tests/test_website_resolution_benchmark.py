@@ -415,6 +415,34 @@ class GateTests(unittest.TestCase):
         summary = replace(self.passing, technical_success_rate=0.89)
         self.assertIs(evaluate_benchmark_gate(summary), BenchmarkGateDecision.FAIL_TECHNICAL)
 
+    def test_technical_failures_cannot_pass_as_safe_no_matches(self):
+        results = [_result(f"official_{index}") for index in range(8)]
+        results.extend(
+            _result(
+                f"no_site_{index}",
+                label=BenchmarkLabel.NO_OFFICIAL_SITE,
+                expected_domain=None,
+                provider_result_domains=(),
+                resolution_status=(
+                    "resolution_error" if index >= 2 else "not_found"
+                ),
+                resolved_domain=None,
+                provider_request_succeeded=index < 2,
+                expected_domain_returned=False,
+                expected_domain_promoted=False,
+                safe_no_match=True,
+                error_category="timeout" if index >= 2 else None,
+            )
+            for index in range(4)
+        )
+        summary = summarize_benchmark(results)
+        self.assertEqual(summary.safe_no_matches, 4)
+        self.assertEqual(summary.technical_success_rate, 10 / 12)
+        self.assertIs(
+            evaluate_benchmark_gate(summary),
+            BenchmarkGateDecision.FAIL_TECHNICAL,
+        )
+
     def test_pass(self):
         self.assertIs(evaluate_benchmark_gate(self.passing), BenchmarkGateDecision.PASS)
 
