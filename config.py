@@ -93,8 +93,8 @@ def _environment_boolean(name: str, default: str) -> str:
 
 
 WEBSITE_SEARCH_PROVIDER = os.getenv("WEBSITE_SEARCH_PROVIDER", "none").strip().casefold()
-if WEBSITE_SEARCH_PROVIDER not in {"none", "brave"}:
-    raise ValueError("WEBSITE_SEARCH_PROVIDER must be one of: none, brave")
+if WEBSITE_SEARCH_PROVIDER not in {"none", "brave", "openai"}:
+    raise ValueError("WEBSITE_SEARCH_PROVIDER must be one of: none, brave, openai")
 
 BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY", "").strip()
 BRAVE_SEARCH_COUNTRY = os.getenv("BRAVE_SEARCH_COUNTRY", "UA").strip()
@@ -121,6 +121,53 @@ MAX_WEBSITE_SEARCH_REQUESTS_PER_TASK = _environment_integer(
 # --- AI-скоринг ---
 # OpenAI scoring is opt-in so imports and paid requests stay off by default.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_WEB_SEARCH_MODEL = os.getenv(
+    "OPENAI_WEB_SEARCH_MODEL",
+    "gpt-5.4-nano",
+).strip()
+if not OPENAI_WEB_SEARCH_MODEL:
+    raise ValueError("OPENAI_WEB_SEARCH_MODEL must not be empty")
+OPENAI_WEB_SEARCH_REASONING_EFFORT = os.getenv(
+    "OPENAI_WEB_SEARCH_REASONING_EFFORT",
+    "low",
+).strip().casefold()
+if OPENAI_WEB_SEARCH_REASONING_EFFORT not in {
+    "none", "low", "medium", "high", "xhigh",
+}:
+    raise ValueError(
+        "OPENAI_WEB_SEARCH_REASONING_EFFORT must be one of: "
+        "none, low, medium, high, xhigh"
+    )
+OPENAI_WEB_SEARCH_CONTEXT_SIZE = os.getenv(
+    "OPENAI_WEB_SEARCH_CONTEXT_SIZE",
+    "low",
+).strip().casefold()
+if OPENAI_WEB_SEARCH_CONTEXT_SIZE not in {"low", "medium", "high"}:
+    raise ValueError(
+        "OPENAI_WEB_SEARCH_CONTEXT_SIZE must be one of: low, medium, high"
+    )
+OPENAI_WEB_SEARCH_COUNTRY = os.getenv(
+    "OPENAI_WEB_SEARCH_COUNTRY",
+    "UA",
+).strip().upper()
+if (
+    len(OPENAI_WEB_SEARCH_COUNTRY) != 2
+    or not OPENAI_WEB_SEARCH_COUNTRY.isascii()
+    or not OPENAI_WEB_SEARCH_COUNTRY.isalpha()
+):
+    raise ValueError("OPENAI_WEB_SEARCH_COUNTRY must be two ASCII letters")
+OPENAI_WEB_SEARCH_MAX_RESULTS = _environment_integer(
+    "OPENAI_WEB_SEARCH_MAX_RESULTS", "5", 1, 10
+)
+OPENAI_WEB_SEARCH_MAX_OUTPUT_TOKENS = _environment_integer(
+    "OPENAI_WEB_SEARCH_MAX_OUTPUT_TOKENS", "1024", 256, 4096
+)
+OPENAI_WEB_SEARCH_TIMEOUT_SECONDS = _environment_float(
+    "OPENAI_WEB_SEARCH_TIMEOUT_SECONDS", "20", 0.0, 30.0
+)
+OPENAI_WEB_SEARCH_EXTERNAL_ACCESS = (
+    _environment_boolean("OPENAI_WEB_SEARCH_EXTERNAL_ACCESS", "true") == "true"
+)
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano").strip()
 OPENAI_SCORING_ENABLED = _environment_boolean("OPENAI_SCORING_ENABLED", "false")
 OPENAI_SCORING_REASONING_EFFORT = os.getenv(

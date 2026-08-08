@@ -660,6 +660,35 @@ class ResolutionAssemblyTests(unittest.TestCase):
         self.assertEqual(resolution.resolved_url, candidate.url)
         self.assertIs(resolution.source, CandidateSource.WEB_SEARCH)
 
+    def test_wrong_same_name_kyiv_clinic_is_not_selected_for_zaporizhzhia(self) -> None:
+        identity = BusinessIdentity(
+            "STATUS стоматологія",
+            "Запоріжжя",
+            "вул. Поштова, 161/36",
+        )
+        candidate = candidate_from_search_result(SearchResult(
+            "https://status-dental-clinic.com.ua/",
+            "STATUS стоматологія — стоматологічна клініка",
+            "Клініка у Києві, вул. Софії Русової, 3",
+            1,
+        ))
+        resolution = resolve_website_candidates(
+            identity,
+            (candidate,),
+            (_attempt(),),
+            (CandidateSource.WEB_SEARCH,),
+        )
+
+        self.assertIs(resolution.status, ResolutionStatus.UNCERTAIN)
+        self.assertIsNone(resolution.resolved_url)
+        self.assertEqual(len(resolution.evidence), 1)
+        evidence = resolution.evidence[0]
+        self.assertIs(evidence.kind, CandidateKind.UNKNOWN)
+        self.assertEqual(evidence.rejected_reason, "insufficient_identity_evidence")
+        self.assertIn(MatchSignal.NAME_EXACT.value, evidence.matched_signals)
+        self.assertNotIn(MatchSignal.PHONE_EXACT.value, evidence.matched_signals)
+        self.assertNotIn(MatchSignal.ADDRESS_TOKEN_OVERLAP.value, evidence.matched_signals)
+
     def test_same_domain_from_maps_and_search_is_found_with_priority_tie_break(self) -> None:
         maps = _candidate(
             source=CandidateSource.MAPS,
