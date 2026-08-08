@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "case_id": "fictional_official_01",
+      "business_name": "Amber Kite Atelier",
+      "city": "Exampleton",
+      "address": "10 Lantern Lane",
+      "phone": "+15550100001",
+      "label": "OFFICIAL_DOMAIN",
+      "expected_domain": "amber-kite.example",
+      "notes": "Synthetic shape example only; not benchmark evidence."
+    },
+    {
+      "case_id": "fictional_official_02",
+      "business_name": "Blue Orchard Studio",
+      "city": "Sampleville",
+      "address": null,
+      "phone": "+15550100002",
+      "label": "OFFICIAL_DOMAIN",
+      "expected_domain": "blue-orchard.example",
+      "notes": "Synthetic shape example only; not benchmark evidence."
+    },
+    {
+      "case_id": "fictional_official_03",
+      "business_name": "Copper Finch Workshop",
+      "city": "Mock City",
+      "address": "3 Fable Square",
+      "phone": null,
+      "label": "OFFICIAL_DOMAIN",
+      "expected_domain": "copper-finch.example",
+      "notes": "Synthetic shape example only; not benchmark evidence."
+    },
+    {
+      "case_id": "fictional_no_site_01",
+      "business_name": "Dawn Pebble Salon",
+      "city": "Exampleton",
+      "address": "8 Paper Street",
+      "phone": "+15550100004",
+      "label": "NO_OFFICIAL_SITE",
+      "expected_domain": null,
+      "notes": "Synthetic shape example only; not benchmark evidence."
+    },
+    {
+      "case_id": "fictional_no_site_02",
+      "business_name": "Elm Lantern Repair",
+      "city": "Sampleville",
+      "address": null,
+      "phone": null,
+      "label": "NO_OFFICIAL_SITE",
+      "expected_domain": null,
+      "notes": "Synthetic shape example only; not benchmark evidence."
+    },
+    {
+      "case_id": "fictional_no_site_03",
+      "business_name": "Frosted Maple Corner",
+      "city": "Mock City",
+      "address": "22 Story Avenue",
+      "phone": "+15550100006",
+      "label": "NO_OFFICIAL_SITE",
+      "expected_domain": null,
+      "notes": "Synthetic shape example only; not benchmark evidence."
+    }
+  ]
+}
