@@ -14,6 +14,9 @@
 """
 
 import asyncio
+import copy
+import json
+import logging
 import time
 import urllib.parse
 from typing import Awaitable, Callable, List, Optional
@@ -28,6 +31,7 @@ from website_candidate_matching import SearchProvider
 from website_pipeline import LeadDecision, ResolverMode, parse_resolver_mode, qualify_lead
 from website_search_runtime import (
     build_configured_search_provider,
+    openai_web_search_telemetry_snapshot,
     search_budget_snapshot,
 )
 from niche_catalog import resolve_niche_plan
@@ -43,6 +47,7 @@ from search_policy import (
 
 # Callback наружу (в Telegram): принимает готовый текст сообщения (на украинском)
 ReportCallback = Callable[[str], Awaitable[None]]
+log = logging.getLogger("lead_hunter.orchestrator")
 
 
 def _normalized_text(value: str) -> str:
@@ -90,6 +95,127 @@ def _business_dedupe_key(business: Business) -> tuple[str, ...] | None:
     if name or address:
         return ("name_address", name, address)
     return None
+
+
+def _shadow_business_summary(businesses: List[Business]) -> dict[str, object]:
+    """Return deterministic, identity-free resolver outcomes for shadow logging."""
+    allowed_statuses = {
+        "found_official",
+        "social_only",
+        "not_found",
+        "uncertain",
+        "resolution_error",
+    }
+    allowed_sources = {"maps", "instagram_bio", "web_search"}
+    status_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    resolved_domains: set[str] = set()
+
+    for business in businesses:
+        raw_status = business.website_resolution_status
+        status = raw_status if raw_status in allowed_statuses else "unknown"
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+        raw_source = business.website_resolution_source
+        if raw_source:
+            source = raw_source if raw_source in allowed_sources else "unknown"
+            source_counts[source] = source_counts.get(source, 0) + 1
+
+        if status == "found_official":
+            raw_url = business.website_resolved_url
+            domain = _normalized_domain(raw_url) if isinstance(raw_url, str) else ""
+            if domain:
+                resolved_domains.add(domain)
+
+    return {
+        "candidate_count": len(businesses),
+        "status_counts": dict(sorted(status_counts.items())),
+        "resolved_domains": sorted(resolved_domains),
+        "source_counts": dict(sorted(source_counts.items())),
+    }
+
+
+def _shadow_resolver_telemetry(
+    businesses: List[Business],
+    provider: SearchProvider | None,
+    *,
+    task_id: int | None,
+) -> dict[str, object]:
+    telemetry: dict[str, object] = {
+        "event": "website_resolver_shadow",
+        "task_id": task_id,
+        **_shadow_business_summary(businesses),
+    }
+
+    budget = search_budget_snapshot(provider)
+    if budget is not None:
+        telemetry["provider_budget"] = {
+            "max_requests": budget.max_requests,
+            "used_requests": budget.used_requests,
+            "remaining_requests": budget.remaining_requests,
+        }
+
+    openai = openai_web_search_telemetry_snapshot(provider)
+    if openai is not None:
+        telemetry["openai_provider"] = {
+            "requests_started": openai.requests_started,
+            "requests_succeeded": openai.requests_succeeded,
+            "requests_failed": openai.requests_failed,
+            "tool_calls_seen": openai.tool_calls_seen,
+            "search_actions_seen": openai.search_actions_seen,
+            "open_page_actions_seen": openai.open_page_actions_seen,
+            "find_in_page_actions_seen": openai.find_in_page_actions_seen,
+            "sources_seen": openai.sources_seen,
+            "identity_candidates_rejected": openai.identity_candidates_rejected,
+            "candidates_returned": openai.candidates_returned,
+            "tool_call_limit_exceeded": openai.tool_call_limit_exceeded,
+            "last_error_category": openai.last_error_category,
+        }
+    return telemetry
+
+
+async def _check_batch_websites_with_resolver_mode(
+    businesses: List[Business],
+    resolver_mode: ResolverMode,
+    provider: SearchProvider | None,
+    *,
+    task_id: int | None = None,
+) -> None:
+    """Audit production objects while isolating all shadow resolver mutations."""
+    if resolver_mode is ResolverMode.OFF:
+        await site_checker.check_sites(businesses)
+        return
+
+    if resolver_mode is ResolverMode.STRICT:
+        await website_resolver.resolve_business_websites(
+            businesses,
+            provider=provider,
+        )
+        await site_checker.check_sites(businesses)
+        return
+
+    await site_checker.check_sites(businesses)
+    try:
+        shadow_businesses = copy.deepcopy(businesses)
+        await website_resolver.resolve_business_websites(
+            shadow_businesses,
+            provider=provider,
+        )
+        telemetry = _shadow_resolver_telemetry(
+            shadow_businesses,
+            provider,
+            task_id=task_id,
+        )
+        log.info(
+            "website_resolver_shadow %s",
+            json.dumps(telemetry, sort_keys=True, separators=(",", ":")),
+        )
+    except Exception as exc:
+        log.warning(
+            "website_resolver_shadow_failed task_id=%s exception_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
 
 
 class SearchStopped(Exception):
@@ -316,13 +442,12 @@ async def run_search(
                     unique_batch.append(business)
 
                 if unique_batch:
-                    if resolver_mode is not ResolverMode.OFF:
-                        await website_resolver.resolve_business_websites(
-                            unique_batch,
-                            provider=runtime_website_search_provider,
-                        )
-                    # Проверяем сайты у уникальных бизнесов батча (быстро, параллельно)
-                    await site_checker.check_sites(unique_batch)
+                    await _check_batch_websites_with_resolver_mode(
+                        unique_batch,
+                        resolver_mode,
+                        runtime_website_search_provider,
+                        task_id=task_id,
+                    )
                     checked_candidates += len(unique_batch)
 
                     if resolver_mode is ResolverMode.STRICT:
