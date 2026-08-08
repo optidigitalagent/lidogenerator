@@ -32,6 +32,7 @@ from website_candidate_matching import (
     ProviderTimeout,
     ProviderUnavailable,
     SearchProviderError,
+    SearchIdentityEvidence,
     SearchRequest,
     SearchResult,
 )
@@ -407,6 +408,46 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(provider.telemetry().tool_call_limit_exceeded)
         self.assertIsNone(provider.telemetry().last_error_category)
 
+    async def test_source_bound_result_maps_typed_identity_evidence_exactly(self):
+        candidate = _item(
+            "https://verified-clinic.example/",
+            "Generic Clinic",
+            "Generic source snippet",
+            name_matches=True,
+            city_matches=True,
+            address_matches=False,
+            phone_matches=True,
+            different_city_detected=False,
+        )
+        response = _response(
+            output_text=_payload(candidate),
+            output=(_tool_call("https://verified-clinic.example/"),),
+        )
+        provider, client = _provider(response)
+        results = await provider.search(SearchRequest(
+            "Generic Clinic",
+            "Generic City",
+            "Generic Address",
+            "+380671234567",
+        ))
+
+        self.assertEqual(len(results), 1)
+        evidence = results[0].identity_evidence
+        self.assertIs(type(evidence), SearchIdentityEvidence)
+        self.assertEqual(
+            (
+                evidence.name_matches,
+                evidence.city_matches,
+                evidence.address_matches,
+                evidence.phone_matches,
+                evidence.different_city_detected,
+                evidence.candidate_url_source_bound,
+            ),
+            (True, True, False, True, False, True),
+        )
+        self.assertEqual(len(client.responses.calls), 1)
+        self.assertEqual(provider.telemetry().tool_calls_seen, 1)
+
     async def test_unsourced_and_unsafe_candidates_are_silently_rejected(self):
         response = _response(
             output_text=_payload(
@@ -424,6 +465,8 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
         provider, _ = _provider(response)
         results = await provider.search(REQUEST)
         self.assertEqual(tuple(item.url for item in results), ("https://verified.example/",))
+        self.assertIsNotNone(results[0].identity_evidence)
+        self.assertTrue(results[0].identity_evidence.candidate_url_source_bound)
         self.assertFalse(hasattr(provider.telemetry(), "source_urls"))
 
     async def test_social_and_directory_urls_reach_the_existing_matcher_layer(self):
@@ -456,7 +499,8 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
                     output=(_tool_call("https://rejected.example/"),),
                 )
                 provider, _ = _provider(response)
-                self.assertEqual(await provider.search(request), ())
+                results = await provider.search(request)
+                self.assertEqual(results, ())
                 telemetry = provider.telemetry()
                 self.assertEqual(telemetry.identity_candidates_rejected, 1)
                 self.assertFalse(hasattr(telemetry, "rejected_url"))
@@ -891,7 +935,7 @@ class ValidationScriptTests(unittest.IsolatedAsyncioTestCase):
             "unknown_actions_seen=0",
             "identity_candidates_rejected=0",
             "tool_call_limit_exceeded=no",
-            "resolution_status=uncertain",
+            "resolution_status=found_official",
             "resolved_domain=",
             "wrong_same_name_domain_returned=no",
             "wrong_same_name_domain_promoted=no",
@@ -904,12 +948,14 @@ class ValidationScriptTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertNotIn(private, text)
 
-    async def test_wrong_kyiv_candidate_is_not_promoted_and_is_safe_success(self):
+    async def test_structured_wrong_city_candidate_is_filtered_and_safe(self):
         response = _response(
             output_text=_payload(_item(
                 "https://status-dental-clinic.com.ua/",
                 "STATUS стоматологія — Київ",
                 "Стоматологічна клініка на вул. Софії Русової, 3",
+                city_matches=False,
+                different_city_detected=True,
             )),
             output=(_tool_call("https://status-dental-clinic.com.ua/"),),
         )
@@ -941,9 +987,9 @@ class ValidationScriptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, 0)
         self.assertIsInstance(text, str)
         self.assertEqual(text.encode("utf-8").decode("utf-8"), text)
-        self.assertIn("resolution_status=uncertain", text)
+        self.assertIn("resolution_status=not_found", text)
         self.assertIn("resolved_domain=\n", text)
-        self.assertIn("wrong_same_name_domain_returned=yes", text)
+        self.assertIn("wrong_same_name_domain_returned=no", text)
         self.assertIn("wrong_same_name_domain_promoted=no", text)
         self.assertIn("final_result=technical_success_safe_no_verified_match", text)
         self.assertNotIn("https://", text)
