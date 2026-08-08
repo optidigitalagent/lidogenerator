@@ -35,6 +35,7 @@ python bot.py
 | `/status` | Статус текущего поиска                              |
 | `/export` | Скачать CSV последнего поиска                       |
 | `/stop`   | Остановить текущий поиск (собранное сохраняется)    |
+| `/sync`   | Показать очередь Opti и повторить ожидающие доставки |
 
 Поиск 50–200 бизнесов занимает 30–90 минут. Прогресс приходит в чат каждые 3 минуты.
 
@@ -63,3 +64,40 @@ lidogenerator/
 
 Всё бесплатно, кроме AI-скоринга: ~$0.30 на 100 бизнесов (Claude Haiku).
 Без ключа `ANTHROPIC_API_KEY` система работает в режиме фильтрации без AI.
+
+## Opti Bridge v0
+
+Lead Generator remains the external discovery source; Opti is the CRM and the
+source of truth after import. After a completed search has persisted its final
+qualified rows and completed the existing CSV/XLSX export, the bridge builds
+`opti.lead-import.v1` directly from SQLite, enqueues immutable JSON in
+`opti_sync_outbox`, and makes one best-effort delivery. It never parses exports,
+and an unavailable Opti service does not fail the search or export.
+
+Delivery is disabled by default. Set `OPTI_BRIDGE_ENABLED=true`, an HTTP(S)
+`OPTI_BASE_URL`, and the server-only `OPTI_IMPORT_TOKEN`. Requests go to
+`POST /integrations/lead-generator/import-batches` with a bearer token and the
+persisted idempotency key
+`lidogenerator:<externalBatchId>:<payloadHash-prefix>`. Redirects are rejected,
+timeouts are bounded, and there is no HTTP-layer automatic retry.
+
+The SQLite worker recovers interrupted `SENDING` rows at startup. Transport and
+temporary server failures move rows to `RETRY` with capped exponential backoff.
+Authentication, configuration, redirect, request, and payload-conflict failures
+move rows to `FAILED`; `/sync` resets failed rows for an explicit retry and shows
+only counts, never tokens or payload bodies. The maximum attempts and retry base
+are controlled by `OPTI_SYNC_MAX_ATTEMPTS` and
+`OPTI_SYNC_RETRY_BASE_SECONDS`.
+
+The stable lead identity priority is: explicit upstream candidate ID, Google
+Place ID, normalized Maps URL, normalized phone, Instagram handle, website
+domain, then a versioned SHA-256 of normalized name/city/address. Local SQLite
+autoincrement IDs are not used. Completed searches enqueue once. Stopped searches
+are not imported in v0 because the current stop path persists a partial set
+before final enrichment/export stabilization.
+
+The canonical example is
+`contracts/opti-lead-import-v1.example.json`. For a local, provider-free smoke,
+configure a disposable `DB_PATH`, run `python scripts/enqueue_opti_smoke.py`,
+then start the bot worker or use `/sync`. The helper only enqueues a fixed
+three-lead batch and performs no network call by itself.

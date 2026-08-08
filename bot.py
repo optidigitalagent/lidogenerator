@@ -7,6 +7,7 @@
   /status — статус текущего/последнего поиска
   /export — прислать CSV последней задачи
   /stop   — остановить текущий поиск
+  /sync   — показать очередь Opti и повторить доставку
 
 Тексты бота — на украинском. Запуск: python bot.py
 """
@@ -33,6 +34,7 @@ from telegram.ext import (
 import config
 import db
 import orchestrator
+from integrations import opti_outbox
 
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s: %(message)s", level=logging.INFO
@@ -64,6 +66,7 @@ ACTIVE: dict = {}
 
 # Ограничение одновременно выполняющихся поисков (общее на весь бот).
 SEARCH_SLOTS = asyncio.Semaphore(config.MAX_CONCURRENT_SEARCHES)
+OUTBOX_WORKER = opti_outbox.OutboxWorker()
 
 
 def is_allowed(update: Update) -> bool:
@@ -105,7 +108,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/search — почати новий пошук\n"
         "/status — статус поточного пошуку\n"
         "/export — завантажити CSV останнього пошуку\n"
-        "/stop — зупинити пошук"
+        "/stop — зупинити пошук\n"
+        "/sync — стан і повтор доставки в Opti"
     )
 
 
@@ -303,6 +307,31 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏹ Зупиняю пошук... Збережу те, що вже зібрано.")
 
 
+# ---------- /sync ----------
+
+async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        await deny(update)
+        return
+    retried = opti_outbox.retry_failed()
+    await opti_outbox.deliver_due(limit=10)
+    prefix = "Opti bridge is disabled. " if not config.OPTI_BRIDGE_ENABLED else ""
+    suffix = f"; manually retried {retried}" if retried else ""
+    await update.message.reply_text(prefix + opti_outbox.format_summary() + suffix)
+
+
+async def _start_outbox_worker(application: Application) -> None:
+    del application
+    # After a process restart no prior in-process sender can still own a row.
+    opti_outbox.recover_stale_sending(stale_after_seconds=0)
+    OUTBOX_WORKER.start()
+
+
+async def _stop_outbox_worker(application: Application) -> None:
+    del application
+    await OUTBOX_WORKER.stop()
+
+
 # ---------- Запуск ----------
 
 def main():
@@ -320,7 +349,13 @@ def main():
     else:
         log.info("ALLOWED_USER_IDS не задан — ботом может пользоваться любой пользователь")
 
-    app = Application.builder().token(config.TELEGRAM_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(config.TELEGRAM_TOKEN)
+        .post_init(_start_outbox_worker)
+        .post_shutdown(_stop_outbox_worker)
+        .build()
+    )
 
     search_conv = ConversationHandler(
         entry_points=[CommandHandler("search", cmd_search)],
@@ -341,6 +376,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CommandHandler("sync", cmd_sync))
 
     log.info("Бот запущено. Зупинка: Ctrl+C")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
