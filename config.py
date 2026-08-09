@@ -118,6 +118,18 @@ MAX_WEBSITE_SEARCH_REQUESTS_PER_TASK = _environment_integer(
     1000,
 )
 
+INSTAGRAM_SEARCH_PROVIDER = os.getenv(
+    "INSTAGRAM_SEARCH_PROVIDER", "none"
+).strip().casefold()
+if INSTAGRAM_SEARCH_PROVIDER not in {"none", "openai"}:
+    raise ValueError("INSTAGRAM_SEARCH_PROVIDER must be one of: none, openai")
+MAX_INSTAGRAM_SEARCH_REQUESTS_PER_TASK = _environment_integer(
+    "MAX_INSTAGRAM_SEARCH_REQUESTS_PER_TASK",
+    "0",
+    0,
+    1000,
+)
+
 # --- AI-скоринг ---
 # OpenAI scoring is opt-in so imports and paid requests stay off by default.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
