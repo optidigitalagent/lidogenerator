@@ -135,6 +135,29 @@ class OpenAIInstagramSearchProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(evidence.website_domain_matches)
         self.assertFalse(evidence.different_city_detected)
 
+    async def test_source_bound_identity_is_case_insensitive(self):
+        provider = OpenAIInstagramSearchProvider(
+            self.settings(),
+            FakeClient(response(
+                [result_item(instagram_url=PROFILE)],
+                sources=("https://www.instagram.com/Synthetic_Brand/",),
+            )),
+        )
+        results = await provider.search(self.request())
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].url, PROFILE)
+        self.assertTrue(results[0].identity_evidence.candidate_url_source_bound)
+
+    async def test_source_bound_identity_rejects_different_username(self):
+        provider = OpenAIInstagramSearchProvider(
+            self.settings(),
+            FakeClient(response(
+                [result_item(instagram_url=PROFILE)],
+                sources=("https://www.instagram.com/other_synthetic/",),
+            )),
+        )
+        self.assertEqual(await provider.search(self.request()), ())
+
     async def test_unsourced_candidate_is_discarded(self):
         client = FakeClient(response([result_item()], sources=("https://instagram.com/other_synthetic",)))
         provider = OpenAIInstagramSearchProvider(self.settings(), client)

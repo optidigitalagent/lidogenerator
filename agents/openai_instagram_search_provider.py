@@ -19,6 +19,7 @@ from instagram_candidate_matching import (
     InstagramSearchRequest,
     InstagramSearchResult,
     normalize_instagram_profile_url,
+    normalize_instagram_username,
 )
 from website_resolution import normalize_domain
 
@@ -455,7 +456,7 @@ class OpenAIInstagramSearchProvider(InstagramSearchProvider):
                     continue
                 sources_seen += 1
                 try:
-                    source_keys.add(normalize_instagram_profile_url(url))
+                    source_keys.add(normalize_instagram_username(url))
                 except (TypeError, ValueError):
                     continue
         self._tool_calls_seen += tool_calls
@@ -482,11 +483,12 @@ class OpenAIInstagramSearchProvider(InstagramSearchProvider):
         for item in eligible:
             try:
                 url = normalize_instagram_profile_url(item["instagram_url"])
+                identity_key = normalize_instagram_username(url)
             except (TypeError, ValueError):
                 continue
-            if url not in source_keys or url in seen:
+            if identity_key not in source_keys or identity_key in seen:
                 continue
-            seen.add(url)
+            seen.add(identity_key)
             results.append(InstagramSearchResult(
                 url,
                 item["title"][:_TITLE_LIMIT],
