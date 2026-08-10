@@ -88,7 +88,7 @@ class PipelineContractTests(unittest.TestCase):
         )
         for status, audit, decision, reason in rows:
             with self.subTest(status=status):
-                actual = qualify_lead(has_instagram=True, resolution=resolution(status), audit=audit)
+                actual = qualify_lead(has_actionable_contact=True, resolution=resolution(status), audit=audit)
                 self.assertEqual((actual.decision, actual.reason), (decision, reason))
 
         found_rows = (
@@ -108,23 +108,23 @@ class PipelineContractTests(unittest.TestCase):
             audited_url = None if status is WebsiteAuditStatus.NOT_RUN else "https://example.com/"
             audit = WebsiteAuditResult(status, audited_url, None, kwargs.get("http_status"), error=kwargs.get("error"))
             self.assertIs(
-                qualify_lead(has_instagram=True, resolution=resolution(ResolutionStatus.FOUND_OFFICIAL), audit=audit).decision,
+                qualify_lead(has_actionable_contact=True, resolution=resolution(ResolutionStatus.FOUND_OFFICIAL), audit=audit).decision,
                 decision,
             )
 
-    def test_no_instagram_always_not_lead(self):
+    def test_no_contact_always_not_lead(self):
         audit = WebsiteAuditResult(WebsiteAuditStatus.BAD, "https://example.com/", None, 200)
         actual = qualify_lead(
-            has_instagram=False,
+            has_actionable_contact=False,
             resolution=resolution(ResolutionStatus.FOUND_OFFICIAL),
             audit=audit,
         )
-        self.assertEqual((actual.decision, actual.reason), (LeadDecision.NOT_LEAD, "instagram_missing"))
+        self.assertEqual((actual.decision, actual.reason), (LeadDecision.NOT_LEAD, "contact_missing"))
 
     def test_incompatible_pair_is_uncertain(self):
         audit = WebsiteAuditResult(WebsiteAuditStatus.GOOD, "https://example.com/", None, 200)
         actual = qualify_lead(
-            has_instagram=True,
+            has_actionable_contact=True,
             resolution=resolution(ResolutionStatus.NOT_FOUND),
             audit=audit,
         )

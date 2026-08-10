@@ -123,7 +123,7 @@ class OrchestratorWebsiteSearchProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(resolution.status, ResolutionStatus.UNCERTAIN)
         self.assertIsNot(resolution.status, ResolutionStatus.NOT_FOUND)
         qualification = qualify_lead(
-            has_instagram=True,
+            has_actionable_contact=True,
             resolution=resolution,
             audit=WebsiteAuditResult(
                 WebsiteAuditStatus.NOT_RUN,

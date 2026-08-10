@@ -143,18 +143,18 @@ class LeadQualification:
 
 def qualify_lead(
     *,
-    has_instagram: bool,
+    has_actionable_contact: bool,
     resolution: WebsiteResolution,
     audit: WebsiteAuditResult,
 ) -> LeadQualification:
-    if type(has_instagram) is not bool:
-        raise TypeError("has_instagram must be a bool")
+    if type(has_actionable_contact) is not bool:
+        raise TypeError("has_actionable_contact must be a bool")
     if not isinstance(resolution, WebsiteResolution):
         raise TypeError("resolution must be a WebsiteResolution")
     if not isinstance(audit, WebsiteAuditResult):
         raise TypeError("audit must be a WebsiteAuditResult")
-    if not has_instagram:
-        return LeadQualification(LeadDecision.NOT_LEAD, "instagram_missing")
+    if not has_actionable_contact:
+        return LeadQualification(LeadDecision.NOT_LEAD, "contact_missing")
 
     if resolution.status is ResolutionStatus.FOUND_OFFICIAL:
         outcomes = {

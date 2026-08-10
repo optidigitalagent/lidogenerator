@@ -44,6 +44,7 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
         stop_event: asyncio.Event | None = None,
         stop_after_site_check: bool = False,
         resolver_mode: str = "shadow",
+        contactability_mode: str = "instagram_only",
         website_search_provider=None,
         resolver_setup=None,
         site_setup=None,
@@ -156,6 +157,11 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
                 max_candidates,
             ),
             patch.object(orchestrator.config, "WEBSITE_RESOLVER_MODE", resolver_mode),
+            patch.object(
+                orchestrator.config,
+                "LEAD_CONTACTABILITY_MODE",
+                contactability_mode,
+            ),
             patch.object(orchestrator.db, "get_task", return_value=task),
             patch.object(orchestrator.db, "update_task_status", statuses),
             patch.object(orchestrator.db, "save_businesses", side_effect=capture("save")),
@@ -296,6 +302,40 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
                     site_setup=site_for(audit_status),
                 )
                 self.assertEqual(business.lead_decision, decision.value)
+
+    async def test_strict_phone_contact_satisfies_multi_channel_caller(self) -> None:
+        business = Business(name="strict-phone", city="Kyiv", phone="0501234567")
+
+        def resolver_setup(item):
+            orchestrator.website_resolver.apply_resolution(
+                item,
+                WebsiteResolution(
+                    ResolutionStatus.NOT_FOUND,
+                    None,
+                    None,
+                    0.0,
+                    (),
+                ),
+            )
+
+        def site_setup(item):
+            item.website_audit_status = "no_official_site"
+            item.website_audit_evidence = "[]"
+
+        run = await self._run(
+            target=1,
+            max_candidates=1,
+            batches=[[business]],
+            resolver_mode="strict",
+            contactability_mode="multi_channel",
+            resolver_setup=resolver_setup,
+            site_setup=site_setup,
+        )
+        self.assertEqual(business.lead_decision, LeadDecision.LEAD.value)
+        self.assertEqual(
+            [item.name for item in run["downstream"]["save"][0]],
+            ["strict-phone"],
+        )
 
     async def test_continues_to_next_batch_when_target_is_not_reached(self) -> None:
         run = await self._run(
