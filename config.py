@@ -47,6 +47,12 @@ INSTAGRAM_DELAY_MAX = 8         # задержка между профилями
 SITE_CHECK_TIMEOUT = 10         # таймаут проверки сайта, сек
 SITE_CHECK_CONCURRENCY = 5      # не более 5 одновременных HTTP-запросов
 
+RENDERED_SITE_AUDIT_MODE = os.getenv(
+    "RENDERED_SITE_AUDIT_MODE", "off"
+).strip().casefold()
+if RENDERED_SITE_AUDIT_MODE not in {"off", "shadow"}:
+    raise ValueError("RENDERED_SITE_AUDIT_MODE must be one of: off, shadow")
+
 WEBSITE_RESOLVER_MODE = os.getenv("WEBSITE_RESOLVER_MODE", "shadow").strip().casefold()
 if WEBSITE_RESOLVER_MODE not in {"off", "shadow", "strict"}:
     raise ValueError("WEBSITE_RESOLVER_MODE must be one of: off, shadow, strict")
@@ -98,6 +104,26 @@ def _environment_boolean(name: str, default: str) -> str:
     if raw not in {"true", "false"}:
         raise ValueError(f"{name} must be true or false")
     return raw
+
+
+MAX_RENDERED_BAD_SITE_AUDITS_PER_TASK = _environment_integer(
+    "MAX_RENDERED_BAD_SITE_AUDITS_PER_TASK", "12", 0, 1000
+)
+MAX_RENDERED_GOOD_SITE_AUDITS_PER_TASK = _environment_integer(
+    "MAX_RENDERED_GOOD_SITE_AUDITS_PER_TASK", "8", 0, 1000
+)
+RENDERED_SITE_AUDIT_CONCURRENCY = _environment_integer(
+    "RENDERED_SITE_AUDIT_CONCURRENCY", "2", 1, 16
+)
+RENDERED_SITE_AUDIT_TIMEOUT_SECONDS = _environment_float(
+    "RENDERED_SITE_AUDIT_TIMEOUT_SECONDS", "12", 0.0, 60.0
+)
+RENDERED_SITE_AUDIT_SETTLE_MILLISECONDS = _environment_integer(
+    "RENDERED_SITE_AUDIT_SETTLE_MILLISECONDS", "750", 0, 10000
+)
+RENDERED_SITE_AUDIT_MAX_HOSTS_PER_PAGE = _environment_integer(
+    "RENDERED_SITE_AUDIT_MAX_HOSTS_PER_PAGE", "40", 1, 200
+)
 
 
 WEBSITE_SEARCH_PROVIDER = os.getenv("WEBSITE_SEARCH_PROVIDER", "none").strip().casefold()

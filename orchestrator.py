@@ -29,6 +29,7 @@ from agents import (
     ai_scorer,
     collector,
     instagram_first_party_resolver,
+    rendered_site_auditor,
     reporter,
     site_checker,
     social_checker,
@@ -42,6 +43,10 @@ from instagram_first_party_resolution import (
 )
 from models import Business
 from integrations.opti_bridge import finalize_completed_task
+from rendered_site_audit import (
+    RenderedSiteAuditRuntime,
+    audit_rendered_sites_shadow,
+)
 from website_candidate_matching import SearchProvider
 from website_pipeline import LeadDecision, ResolverMode, parse_resolver_mode, qualify_lead
 from website_search_runtime import (
@@ -464,6 +469,30 @@ async def _run_first_party_instagram_apply(
         )
 
 
+async def _run_rendered_site_audit_shadow(
+    businesses: List[Business],
+    runtime: RenderedSiteAuditRuntime | None,
+    *,
+    task_id: int | None,
+) -> None:
+    """Observe real post-site-check state without retaining or mutating identity."""
+    if runtime is None:
+        return
+    try:
+        summary = await audit_rendered_sites_shadow(businesses, runtime)
+        telemetry = summary.telemetry(task_id=task_id)
+        log.info(
+            "rendered_site_audit_shadow %s",
+            json.dumps(telemetry, sort_keys=True, separators=(",", ":")),
+        )
+    except Exception as exc:
+        log.warning(
+            "rendered_site_audit_shadow_failed task_id=%s exception_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+
+
 async def _check_batch_websites_with_resolver_mode(
     businesses: List[Business],
     resolver_mode: ResolverMode,
@@ -472,6 +501,7 @@ async def _check_batch_websites_with_resolver_mode(
     task_id: int | None = None,
     first_party_mode: str = "off",
     first_party_resolver_runtime: FirstPartyInstagramResolver | None = None,
+    rendered_audit_runtime: RenderedSiteAuditRuntime | None = None,
 ) -> None:
     """Audit production objects while isolating all shadow resolver mutations."""
     if first_party_mode not in {"off", "shadow", "apply"}:
@@ -485,6 +515,11 @@ async def _check_batch_websites_with_resolver_mode(
 
     if resolver_mode is ResolverMode.OFF:
         await site_checker.check_sites(businesses)
+        await _run_rendered_site_audit_shadow(
+            businesses,
+            rendered_audit_runtime,
+            task_id=task_id,
+        )
         if first_party_mode == "shadow" and first_party_resolver_runtime is not None:
             first_party_shadow_businesses = copy.deepcopy(businesses)
             for item in first_party_shadow_businesses:
@@ -510,6 +545,11 @@ async def _check_batch_websites_with_resolver_mode(
             provider=provider,
         )
         await site_checker.check_sites(businesses)
+        await _run_rendered_site_audit_shadow(
+            businesses,
+            rendered_audit_runtime,
+            task_id=task_id,
+        )
         if first_party_mode == "shadow" and first_party_resolver_runtime is not None:
             await _run_first_party_instagram_shadow(
                 copy.deepcopy(businesses),
@@ -525,6 +565,11 @@ async def _check_batch_websites_with_resolver_mode(
         return
 
     await site_checker.check_sites(businesses)
+    await _run_rendered_site_audit_shadow(
+        businesses,
+        rendered_audit_runtime,
+        task_id=task_id,
+    )
     shadow_businesses = copy.deepcopy(businesses)
     try:
         await website_resolver.resolve_business_websites(
@@ -593,6 +638,7 @@ async def run_search(
     progress_interval: int = None,
     website_search_provider: SearchProvider | None = None,
     first_party_resolver_runtime: FirstPartyInstagramResolver | None = None,
+    rendered_audit_runtime: RenderedSiteAuditRuntime | None = None,
 ) -> Optional[str]:
     """Полный цикл поиска для задачи task_id.
 
@@ -630,6 +676,13 @@ async def run_search(
         )
     else:
         runtime_first_party_resolver = None
+    if config.RENDERED_SITE_AUDIT_MODE == "shadow":
+        runtime_rendered_audit = (
+            rendered_audit_runtime
+            or rendered_site_auditor.build_configured_rendered_site_audit_runtime()
+        )
+    else:
+        runtime_rendered_audit = None
     stop_flag = (lambda: stop_event.is_set()) if stop_event else None
 
     # Накопители по ходу батчевого сбора
@@ -838,6 +891,7 @@ async def run_search(
                         task_id=task_id,
                         first_party_mode=config.INSTAGRAM_FIRST_PARTY_MODE,
                         first_party_resolver_runtime=runtime_first_party_resolver,
+                        rendered_audit_runtime=runtime_rendered_audit,
                     )
                     if config.INSTAGRAM_FIRST_PARTY_MODE == "apply":
                         first_party_instagrams_recovered += sum(
@@ -1027,6 +1081,16 @@ async def run_search(
         if progress_callback:
             await progress_callback(f"❌ Помилка: {type(e).__name__}: {e}")
         raise
+    finally:
+        if runtime_rendered_audit is not None:
+            try:
+                await runtime_rendered_audit.close()
+            except Exception as exc:
+                log.warning(
+                    "rendered_site_audit_shadow_failed task_id=%s exception_type=%s",
+                    task_id,
+                    type(exc).__name__,
+                )
 
 
 if __name__ == "__main__":
