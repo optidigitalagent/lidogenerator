@@ -170,6 +170,12 @@ class InstagramBenchmarkCaseResult:
     candidates_returned: int
     identity_candidates_rejected: int
     sources_seen: int
+    structured_candidates_seen: int = 0
+    identity_prefilter_rejected: int = 0
+    direct_profile_sources_seen: int = 0
+    invalid_profile_candidates_discarded: int = 0
+    source_unbound_candidates_discarded: int = 0
+    source_bound_candidates_returned: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.label, InstagramBenchmarkLabel):
@@ -185,6 +191,12 @@ class InstagramBenchmarkCaseResult:
             "candidates_returned",
             "identity_candidates_rejected",
             "sources_seen",
+            "structured_candidates_seen",
+            "identity_prefilter_rejected",
+            "direct_profile_sources_seen",
+            "invalid_profile_candidates_discarded",
+            "source_unbound_candidates_discarded",
+            "source_bound_candidates_returned",
         ):
             if type(getattr(self, name)) is not int or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
@@ -200,6 +212,12 @@ class _Telemetry:
     candidates_returned: int = 0
     identity_candidates_rejected: int = 0
     sources_seen: int = 0
+    structured_candidates_seen: int = 0
+    identity_prefilter_rejected: int = 0
+    direct_profile_sources_seen: int = 0
+    invalid_profile_candidates_discarded: int = 0
+    source_unbound_candidates_discarded: int = 0
+    source_bound_candidates_returned: int = 0
     tool_call_limit_exceeded: bool = False
 
 
@@ -294,6 +312,16 @@ def _case_result(
         candidates_returned=telemetry.candidates_returned or candidates_returned,
         identity_candidates_rejected=telemetry.identity_candidates_rejected,
         sources_seen=telemetry.sources_seen,
+        structured_candidates_seen=telemetry.structured_candidates_seen,
+        identity_prefilter_rejected=telemetry.identity_prefilter_rejected,
+        direct_profile_sources_seen=telemetry.direct_profile_sources_seen,
+        invalid_profile_candidates_discarded=(
+            telemetry.invalid_profile_candidates_discarded
+        ),
+        source_unbound_candidates_discarded=(
+            telemetry.source_unbound_candidates_discarded
+        ),
+        source_bound_candidates_returned=telemetry.source_bound_candidates_returned,
     )
 
 
@@ -454,12 +482,12 @@ def evaluate_benchmark_gate(
         return InstagramBenchmarkGateDecision.FAIL_DATASET_SHAPE
     if metrics.critical_false_promotions or metrics.wrong_official_promotions:
         return InstagramBenchmarkGateDecision.FAIL_FALSE_PROMOTION
-    if metrics.promotion_precision < 0.95:
-        return InstagramBenchmarkGateDecision.FAIL_PRECISION
     if metrics.negative_specificity < 1.0:
         return InstagramBenchmarkGateDecision.FAIL_SPECIFICITY
     if metrics.official_recall < 0.50:
         return InstagramBenchmarkGateDecision.FAIL_RECALL
+    if metrics.promotion_precision < 0.95:
+        return InstagramBenchmarkGateDecision.FAIL_PRECISION
     if metrics.technical_success_rate < 0.90:
         return InstagramBenchmarkGateDecision.FAIL_TECHNICAL
     if any(

@@ -8,6 +8,7 @@ from agents.openai_instagram_search_provider import (
     OPENAI_INSTAGRAM_SEARCH_SCHEMA,
     OpenAIInstagramSearchProvider,
     OpenAIInstagramSearchSettings,
+    _suggested_query_variants,
     build_openai_instagram_search_input,
 )
 from instagram_candidate_matching import (
@@ -104,21 +105,42 @@ class OpenAIInstagramSearchProviderTests(unittest.IsolatedAsyncioTestCase):
             phone="+1 202 555 0101",
             website_url="https://synthetic.invalid",
         )
+        queries = _suggested_query_variants(request)
         prompt = build_openai_instagram_search_input(request)
-        first_query = prompt.split("Suggested query variants:\n", 1)[1].splitlines()[0]
-        self.assertIn('"Synthetic Brand" "12025550101" Instagram', first_query)
-        self.assertIn('"Synthetic Brand" "Example City" Instagram', prompt)
-        self.assertIn('"Synthetic Brand" "12 Example Avenue" Instagram', prompt)
+        self.assertEqual(queries, (
+            'site:instagram.com "Synthetic Brand" "12025550101"',
+            'site:instagram.com "Synthetic Brand" "Example City"',
+            'site:instagram.com "Synthetic Brand" "synthetic.invalid"',
+        ))
+        self.assertLessEqual(len(queries), 3)
+        self.assertEqual(len(queries), len(set(queries)))
+        self.assertTrue(all(query.startswith("site:instagram.com ") for query in queries))
         self.assertEqual(prompt, build_openai_instagram_search_input(request))
         self.assertNotIn("expected_username", prompt.casefold())
         self.assertNotIn("benchmark", prompt.casefold())
 
     def test_website_domain_query_variant(self):
-        prompt = build_openai_instagram_search_input(
-            self.request(address=None, website_url="https://www.synthetic.invalid/path")
+        queries = _suggested_query_variants(
+            self.request(website_url="https://www.synthetic.invalid/path")
         )
-        first_query = prompt.split("Suggested query variants:\n", 1)[1].splitlines()[0]
-        self.assertIn('"Synthetic Brand" "synthetic.invalid" Instagram', first_query)
+        self.assertEqual(queries, (
+            'site:instagram.com "Synthetic Brand" "synthetic.invalid"',
+            'site:instagram.com "Synthetic Brand" "Example City"',
+            'site:instagram.com "Synthetic Brand" "12 Example Avenue"',
+        ))
+
+    def test_address_and_name_city_query_fallbacks(self):
+        self.assertEqual(
+            _suggested_query_variants(self.request()),
+            (
+                'site:instagram.com "Synthetic Brand" "Example City"',
+                'site:instagram.com "Synthetic Brand" "12 Example Avenue"',
+            ),
+        )
+        self.assertEqual(
+            _suggested_query_variants(self.request(address=None)),
+            ('site:instagram.com "Synthetic Brand" "Example City"',),
+        )
 
     async def test_source_bound_candidate_is_returned_with_all_evidence(self):
         item = result_item(phone_matches=True, website_domain_matches=True)
@@ -159,22 +181,71 @@ class OpenAIInstagramSearchProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await provider.search(self.request()), ())
 
     async def test_unsourced_candidate_is_discarded(self):
-        client = FakeClient(response([result_item()], sources=("https://instagram.com/other_synthetic",)))
+        client = FakeClient(response(
+            [result_item()],
+            sources=("https://synthetic.invalid/about",),
+        ))
         provider = OpenAIInstagramSearchProvider(self.settings(), client)
         self.assertEqual(await provider.search(self.request()), ())
+        telemetry = provider.telemetry()
+        self.assertEqual(telemetry.requests_succeeded, 1)
+        self.assertEqual(telemetry.requests_failed, 0)
+        self.assertEqual(telemetry.direct_profile_sources_seen, 0)
+        self.assertEqual(telemetry.source_unbound_candidates_discarded, 1)
 
-    async def test_post_and_reel_urls_are_discarded(self):
+    async def test_zero_direct_profile_sources_is_safe_empty_success(self):
+        provider = OpenAIInstagramSearchProvider(
+            self.settings(), FakeClient(response([result_item()], sources=()))
+        )
+        self.assertEqual(await provider.search(self.request()), ())
+        telemetry = provider.telemetry()
+        self.assertEqual(telemetry.requests_succeeded, 1)
+        self.assertIsNone(telemetry.last_error_category)
+
+    async def test_post_reel_and_story_sources_do_not_bind(self):
         for invalid in (
             "https://instagram.com/p/synthetic_post",
             "https://instagram.com/reel/synthetic_reel",
+            "https://instagram.com/stories/synthetic_brand/123",
         ):
             with self.subTest(url=invalid):
                 client = FakeClient(response(
-                    [result_item(instagram_url=invalid)],
-                    sources=(PROFILE, invalid),
+                    [result_item()],
+                    sources=(invalid,),
                 ))
                 provider = OpenAIInstagramSearchProvider(self.settings(), client)
                 self.assertEqual(await provider.search(self.request()), ())
+                telemetry = provider.telemetry()
+                self.assertEqual(telemetry.direct_profile_sources_seen, 0)
+                self.assertEqual(telemetry.source_unbound_candidates_discarded, 1)
+
+    async def test_invalid_structured_profile_is_discarded(self):
+        provider = OpenAIInstagramSearchProvider(
+            self.settings(),
+            FakeClient(response([
+                result_item(instagram_url="https://instagram.com/p/synthetic_post")
+            ])),
+        )
+        self.assertEqual(await provider.search(self.request()), ())
+        self.assertEqual(
+            provider.telemetry().invalid_profile_candidates_discarded,
+            1,
+        )
+
+    async def test_mixed_sources_return_only_exact_source_bound_candidate(self):
+        other = "https://www.instagram.com/other_synthetic/"
+        provider = OpenAIInstagramSearchProvider(
+            self.settings(),
+            FakeClient(response(
+                [result_item(), result_item(instagram_url=other)],
+                sources=("https://synthetic.invalid/about", PROFILE),
+            )),
+        )
+        results = await provider.search(self.request())
+        self.assertEqual(tuple(item.url for item in results), (PROFILE,))
+        telemetry = provider.telemetry()
+        self.assertEqual(telemetry.source_bound_candidates_returned, 1)
+        self.assertEqual(telemetry.source_unbound_candidates_discarded, 1)
 
     async def test_identity_prefilter_and_different_city_reject(self):
         items = (
@@ -226,6 +297,14 @@ class OpenAIInstagramSearchProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(telemetry.tool_call_limit_exceeded)
         self.assertEqual(telemetry.last_error_category, "tool_call_limit")
 
+    async def test_zero_tool_calls_fails_closed(self):
+        provider = OpenAIInstagramSearchProvider(
+            self.settings(), FakeClient(response([], sources=(), tool_calls=0))
+        )
+        with self.assertRaises(InstagramSearchProviderError):
+            await provider.search(self.request())
+        self.assertEqual(provider.telemetry().last_error_category, "response_error")
+
     async def test_malformed_payload_is_typed_error(self):
         malformed = result_item(name_matches=1)
         provider = OpenAIInstagramSearchProvider(
@@ -235,9 +314,33 @@ class OpenAIInstagramSearchProviderTests(unittest.IsolatedAsyncioTestCase):
             await provider.search(self.request())
         self.assertEqual(provider.telemetry().last_error_category, "response_error")
 
+    async def test_api_error_is_typed_error(self):
+        client = FakeClient(response([]))
+        client.responses.create.side_effect = RuntimeError("synthetic failure")
+        provider = OpenAIInstagramSearchProvider(self.settings(), client)
+        with self.assertRaises(InstagramSearchProviderError):
+            await provider.search(self.request())
+        telemetry = provider.telemetry()
+        self.assertEqual(telemetry.requests_failed, 1)
+        self.assertEqual(telemetry.last_error_category, "api_error")
+
     async def test_telemetry_is_safe_and_counts_results(self):
+        other = "https://www.instagram.com/other_synthetic/"
         provider = OpenAIInstagramSearchProvider(
-            self.settings(), FakeClient(response([result_item()]))
+            self.settings(),
+            FakeClient(response(
+                [
+                    result_item(),
+                    result_item(address_matches=False),
+                    result_item(instagram_url="https://instagram.com/p/invalid_fixture"),
+                    result_item(instagram_url=other),
+                ],
+                sources=(
+                    PROFILE,
+                    "https://instagram.com/reel/source_fixture",
+                    "https://synthetic.invalid/about",
+                ),
+            )),
         )
         await provider.search(self.request())
         snapshot = provider.telemetry()
@@ -246,8 +349,15 @@ class OpenAIInstagramSearchProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.requests_failed, 0)
         self.assertEqual(snapshot.tool_calls_seen, 1)
         self.assertEqual(snapshot.search_actions_seen, 1)
-        self.assertEqual(snapshot.sources_seen, 1)
+        self.assertEqual(snapshot.sources_seen, 3)
         self.assertEqual(snapshot.candidates_returned, 1)
+        self.assertEqual(snapshot.structured_candidates_seen, 4)
+        self.assertEqual(snapshot.identity_prefilter_rejected, 1)
+        self.assertEqual(snapshot.identity_candidates_rejected, 1)
+        self.assertEqual(snapshot.direct_profile_sources_seen, 1)
+        self.assertEqual(snapshot.invalid_profile_candidates_discarded, 1)
+        self.assertEqual(snapshot.source_unbound_candidates_discarded, 1)
+        self.assertEqual(snapshot.source_bound_candidates_returned, 1)
         self.assertNotIn("prompt", asdict(snapshot))
         self.assertNotIn("url", " ".join(asdict(snapshot).keys()))
         stored = repr(provider.__dict__)
