@@ -133,8 +133,8 @@ MAX_INSTAGRAM_SEARCH_REQUESTS_PER_TASK = _environment_integer(
 INSTAGRAM_FIRST_PARTY_MODE = os.getenv(
     "INSTAGRAM_FIRST_PARTY_MODE", "off"
 ).strip().casefold()
-if INSTAGRAM_FIRST_PARTY_MODE not in {"off", "shadow"}:
-    raise ValueError("INSTAGRAM_FIRST_PARTY_MODE must be one of: off, shadow")
+if INSTAGRAM_FIRST_PARTY_MODE not in {"off", "shadow", "apply"}:
+    raise ValueError("INSTAGRAM_FIRST_PARTY_MODE must be one of: off, shadow, apply")
 MAX_INSTAGRAM_FIRST_PARTY_REQUESTS_PER_TASK = _environment_integer(
     "MAX_INSTAGRAM_FIRST_PARTY_REQUESTS_PER_TASK", "0", 0, 1000
 )

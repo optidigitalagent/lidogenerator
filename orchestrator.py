@@ -279,6 +279,128 @@ async def _run_first_party_instagram_shadow(
         )
 
 
+def _first_party_apply_eligible(business: Business) -> bool:
+    """Return whether real post-site-check state permits first-party recovery."""
+    return (
+        not business.instagram_url
+        and business.website_status == "bad website"
+        and instagram_first_party_resolver.trusted_website_for_instagram_resolution(
+            business
+        )
+        is not None
+    )
+
+
+def _first_party_apply_telemetry(
+    businesses: List[Business],
+    eligible_businesses: List[Business],
+    resolutions: tuple[FirstPartyInstagramResolution, ...],
+    resolver: FirstPartyInstagramResolver,
+    *,
+    task_id: int | None,
+    missing_instagram_before: int,
+    bad_site_missing_instagram_count: int,
+) -> dict[str, object]:
+    status_counts = {
+        status: sum(1 for result in resolutions if result.status is status)
+        for status in FirstPartyInstagramStatus
+    }
+    applied_businesses = [
+        business
+        for business, result in zip(eligible_businesses, resolutions)
+        if result.status is FirstPartyInstagramStatus.FOUND_OFFICIAL
+        and business.instagram_url == result.resolved_url
+    ]
+    budget = resolver.budget.snapshot()
+    return {
+        "event": "instagram_first_party_apply",
+        "task_id": task_id,
+        "batch_candidate_count": len(businesses),
+        "missing_instagram_before": missing_instagram_before,
+        "bad_site_missing_instagram_count": bad_site_missing_instagram_count,
+        "eligible_businesses": len(eligible_businesses),
+        "attempted_businesses": sum(
+            1 for result in resolutions if result.pages_attempted > 0
+        ),
+        "found_official_count": status_counts[
+            FirstPartyInstagramStatus.FOUND_OFFICIAL
+        ],
+        "applied_count": len(applied_businesses),
+        "legacy_lead_eligible_after_apply": sum(
+            1 for business in applied_businesses if business.is_lead
+        ),
+        "not_found_count": status_counts[FirstPartyInstagramStatus.NOT_FOUND],
+        "uncertain_count": status_counts[FirstPartyInstagramStatus.UNCERTAIN],
+        "technical_error_count": status_counts[
+            FirstPartyInstagramStatus.TECHNICAL_ERROR
+        ],
+        "skipped_count": status_counts[FirstPartyInstagramStatus.SKIPPED],
+        "requests": {
+            "max": budget.max_requests,
+            "used": budget.used_requests,
+            "remaining": budget.remaining_requests,
+        },
+        "pages_attempted": sum(result.pages_attempted for result in resolutions),
+        "pages_succeeded": sum(result.pages_succeeded for result in resolutions),
+        "evidence_source_counts": {
+            source.value: sum(
+                1 for result in resolutions if source in result.evidence_sources
+            )
+            for source in FirstPartyInstagramEvidenceSource
+        },
+    }
+
+
+async def _run_first_party_instagram_apply(
+    businesses: List[Business],
+    resolver: FirstPartyInstagramResolver,
+    *,
+    task_id: int | None,
+) -> None:
+    """Apply deterministic recovery to eligible real post-site-check objects."""
+    if not businesses:
+        return
+    missing_instagram_before = sum(
+        1 for business in businesses if not business.instagram_url
+    )
+    bad_site_missing_instagram_count = sum(
+        1
+        for business in businesses
+        if not business.instagram_url and business.website_status == "bad website"
+    )
+    eligible_businesses = [
+        business for business in businesses if _first_party_apply_eligible(business)
+    ]
+    try:
+        resolutions: tuple[FirstPartyInstagramResolution, ...] = ()
+        if eligible_businesses:
+            resolutions = (
+                await instagram_first_party_resolver.resolve_missing_instagrams_first_party(
+                    eligible_businesses,
+                    resolver=resolver,
+                )
+            )
+        telemetry = _first_party_apply_telemetry(
+            businesses,
+            eligible_businesses,
+            resolutions,
+            resolver,
+            task_id=task_id,
+            missing_instagram_before=missing_instagram_before,
+            bad_site_missing_instagram_count=bad_site_missing_instagram_count,
+        )
+        log.info(
+            "instagram_first_party_apply %s",
+            json.dumps(telemetry, sort_keys=True, separators=(",", ":")),
+        )
+    except Exception as exc:
+        log.warning(
+            "instagram_first_party_apply_failed task_id=%s exception_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+
+
 async def _check_batch_websites_with_resolver_mode(
     businesses: List[Business],
     resolver_mode: ResolverMode,
@@ -289,8 +411,8 @@ async def _check_batch_websites_with_resolver_mode(
     first_party_resolver_runtime: FirstPartyInstagramResolver | None = None,
 ) -> None:
     """Audit production objects while isolating all shadow resolver mutations."""
-    if first_party_mode not in {"off", "shadow"}:
-        raise ValueError("first_party_mode must be off or shadow")
+    if first_party_mode not in {"off", "shadow", "apply"}:
+        raise ValueError("first_party_mode must be off, shadow, or apply")
     if first_party_mode == "off":
         first_party_resolver_runtime = None
     elif first_party_resolver_runtime is None:
@@ -300,7 +422,7 @@ async def _check_batch_websites_with_resolver_mode(
 
     if resolver_mode is ResolverMode.OFF:
         await site_checker.check_sites(businesses)
-        if first_party_resolver_runtime is not None:
+        if first_party_mode == "shadow" and first_party_resolver_runtime is not None:
             first_party_shadow_businesses = copy.deepcopy(businesses)
             for item in first_party_shadow_businesses:
                 item.website_original_url = ""
@@ -308,6 +430,12 @@ async def _check_batch_websites_with_resolver_mode(
                 item.website_resolved_url = ""
             await _run_first_party_instagram_shadow(
                 first_party_shadow_businesses,
+                first_party_resolver_runtime,
+                task_id=task_id,
+            )
+        elif first_party_mode == "apply" and first_party_resolver_runtime is not None:
+            await _run_first_party_instagram_apply(
+                businesses,
                 first_party_resolver_runtime,
                 task_id=task_id,
             )
@@ -319,9 +447,15 @@ async def _check_batch_websites_with_resolver_mode(
             provider=provider,
         )
         await site_checker.check_sites(businesses)
-        if first_party_resolver_runtime is not None:
+        if first_party_mode == "shadow" and first_party_resolver_runtime is not None:
             await _run_first_party_instagram_shadow(
                 copy.deepcopy(businesses),
+                first_party_resolver_runtime,
+                task_id=task_id,
+            )
+        elif first_party_mode == "apply" and first_party_resolver_runtime is not None:
+            await _run_first_party_instagram_apply(
+                businesses,
                 first_party_resolver_runtime,
                 task_id=task_id,
             )
@@ -349,9 +483,15 @@ async def _check_batch_websites_with_resolver_mode(
             task_id,
             type(exc).__name__,
         )
-    if first_party_resolver_runtime is not None:
+    if first_party_mode == "shadow" and first_party_resolver_runtime is not None:
         await _run_first_party_instagram_shadow(
             shadow_businesses,
+            first_party_resolver_runtime,
+            task_id=task_id,
+        )
+    elif first_party_mode == "apply" and first_party_resolver_runtime is not None:
+        await _run_first_party_instagram_apply(
+            businesses,
             first_party_resolver_runtime,
             task_id=task_id,
         )
@@ -420,7 +560,7 @@ async def run_search(
         runtime_website_search_provider = None
     else:
         runtime_website_search_provider = build_configured_search_provider()
-    if config.INSTAGRAM_FIRST_PARTY_MODE == "shadow":
+    if config.INSTAGRAM_FIRST_PARTY_MODE in {"shadow", "apply"}:
         runtime_first_party_resolver = (
             first_party_resolver_runtime
             or instagram_first_party_resolver.build_configured_first_party_resolver()
@@ -433,6 +573,7 @@ async def run_search(
     leads: List[Business] = []          # валидные лиды (то, что попадёт в таблицу)
     visited = 0                         # просмотрено бизнесов всего
     checked_candidates = 0              # уникальные кандидаты с завершённой проверкой сайта
+    first_party_instagrams_recovered = 0
     skipped_no_instagram = 0            # пропущено: нет Instagram
     skipped_good_site = 0               # пропущено: есть Instagram, но хороший сайт
     skipped_uncertain_website = 0       # пропущено: результат сайта недостаточно надёжен
@@ -491,6 +632,11 @@ async def run_search(
 
     async def _send_progress(force: bool = False):
         added_no_site, added_bad_site = _added_counts()
+        first_party_recovery_line = (
+            f"Відновлено Instagram з офіційного сайту: {first_party_instagrams_recovered}\n"
+            if config.INSTAGRAM_FIRST_PARTY_MODE == "apply"
+            else ""
+        )
         await _update_website_search_budget_progress()
         await progress.update(
             "main",
@@ -501,6 +647,7 @@ async def run_search(
             f"Перевірено унікальних кандидатів: {checked_candidates}/{policy.max_candidates}\n"
             f"Знайдено валідних лідів: {len(leads)}/{target_leads}\n"
             f"Пропущено без Instagram: {skipped_no_instagram}\n"
+            f"{first_party_recovery_line}"
             f"Пропущено з гарним сайтом: {skipped_good_site}\n"
             f"Пропущено через невизначений статус сайту: {skipped_uncertain_website}\n"
             f"Додано без сайту: {added_no_site}\n"
@@ -589,6 +736,11 @@ async def run_search(
                     unique_batch.append(business)
 
                 if unique_batch:
+                    missing_instagram_before = tuple(
+                        business
+                        for business in unique_batch
+                        if not business.instagram_url
+                    )
                     await _check_batch_websites_with_resolver_mode(
                         unique_batch,
                         resolver_mode,
@@ -597,6 +749,12 @@ async def run_search(
                         first_party_mode=config.INSTAGRAM_FIRST_PARTY_MODE,
                         first_party_resolver_runtime=runtime_first_party_resolver,
                     )
+                    if config.INSTAGRAM_FIRST_PARTY_MODE == "apply":
+                        first_party_instagrams_recovered += sum(
+                            1
+                            for business in missing_instagram_before
+                            if business.instagram_url
+                        )
                     checked_candidates += len(unique_batch)
 
                     if resolver_mode is ResolverMode.STRICT:
@@ -706,6 +864,11 @@ async def run_search(
 
         # --- Финальный отчёт ---
         added_no_site, added_bad_site = _added_counts()
+        first_party_recovery_line = (
+            f"Відновлено Instagram з офіційного сайту: {first_party_instagrams_recovered}\n"
+            if config.INSTAGRAM_FIRST_PARTY_MODE == "apply"
+            else ""
+        )
         await _update_website_search_budget_progress()
         shortage = ""
         if len(leads) < target_leads:
@@ -721,6 +884,7 @@ async def run_search(
             f"Відкрито карток Google Maps: {visited}/{policy.max_discovery_cards}\n"
             f"Перевірено унікальних кандидатів: {checked_candidates}/{policy.max_candidates}\n"
             f"Пропущено без Instagram: {skipped_no_instagram}\n"
+            f"{first_party_recovery_line}"
             f"Пропущено з гарним сайтом: {skipped_good_site}\n"
             f"Пропущено через невизначений статус сайту: {skipped_uncertain_website}\n"
             f"Додано без сайту: {added_no_site}\n"
