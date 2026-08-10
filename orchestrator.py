@@ -24,7 +24,21 @@ from typing import Awaitable, Callable, List, Optional
 import city_catalog
 import config
 import db
-from agents import collector, site_checker, social_checker, ai_scorer, reporter, website_resolver
+from agents import (
+    ai_scorer,
+    collector,
+    instagram_first_party_resolver,
+    reporter,
+    site_checker,
+    social_checker,
+    website_resolver,
+)
+from agents.instagram_first_party_resolver import FirstPartyInstagramResolver
+from instagram_first_party_resolution import (
+    FirstPartyInstagramEvidenceSource,
+    FirstPartyInstagramResolution,
+    FirstPartyInstagramStatus,
+)
 from models import Business
 from integrations.opti_bridge import finalize_completed_task
 from website_candidate_matching import SearchProvider
@@ -174,16 +188,129 @@ def _shadow_resolver_telemetry(
     return telemetry
 
 
+def _first_party_shadow_telemetry(
+    businesses: List[Business],
+    resolutions: tuple[FirstPartyInstagramResolution, ...],
+    resolver: FirstPartyInstagramResolver,
+    *,
+    task_id: int | None,
+    missing_instagram_count: int,
+    trusted_website_count: int,
+) -> dict[str, object]:
+    status_counts = {
+        status: sum(1 for result in resolutions if result.status is status)
+        for status in FirstPartyInstagramStatus
+    }
+    budget = resolver.budget.snapshot()
+    return {
+        "event": "instagram_first_party_shadow",
+        "task_id": task_id,
+        "batch_candidate_count": len(businesses),
+        "missing_instagram_count": missing_instagram_count,
+        "trusted_website_count": trusted_website_count,
+        "attempted_businesses": sum(
+            1
+            for result in resolutions
+            if result.pages_attempted > 0
+        ),
+        "found_official_count": status_counts[
+            FirstPartyInstagramStatus.FOUND_OFFICIAL
+        ],
+        "not_found_count": status_counts[FirstPartyInstagramStatus.NOT_FOUND],
+        "uncertain_count": status_counts[FirstPartyInstagramStatus.UNCERTAIN],
+        "technical_error_count": status_counts[
+            FirstPartyInstagramStatus.TECHNICAL_ERROR
+        ],
+        "skipped_count": status_counts[FirstPartyInstagramStatus.SKIPPED],
+        "requests": {
+            "max": budget.max_requests,
+            "used": budget.used_requests,
+            "remaining": budget.remaining_requests,
+        },
+        "pages_attempted": sum(result.pages_attempted for result in resolutions),
+        "pages_succeeded": sum(result.pages_succeeded for result in resolutions),
+        "evidence_source_counts": {
+            source.value: sum(
+                1 for result in resolutions if source in result.evidence_sources
+            )
+            for source in FirstPartyInstagramEvidenceSource
+        },
+    }
+
+
+async def _run_first_party_instagram_shadow(
+    businesses: List[Business],
+    resolver: FirstPartyInstagramResolver,
+    *,
+    task_id: int | None,
+) -> None:
+    missing_instagram_count = sum(1 for item in businesses if not item.instagram_url)
+    trusted_website_count = sum(
+        1
+        for item in businesses
+        if not item.instagram_url
+        and instagram_first_party_resolver.trusted_website_for_instagram_resolution(item)
+        is not None
+    )
+    try:
+        resolutions = (
+            await instagram_first_party_resolver.resolve_missing_instagrams_first_party(
+                businesses,
+                resolver=resolver,
+            )
+        )
+        telemetry = _first_party_shadow_telemetry(
+            businesses,
+            resolutions,
+            resolver,
+            task_id=task_id,
+            missing_instagram_count=missing_instagram_count,
+            trusted_website_count=trusted_website_count,
+        )
+        log.info(
+            "instagram_first_party_shadow %s",
+            json.dumps(telemetry, sort_keys=True, separators=(",", ":")),
+        )
+    except Exception as exc:
+        log.warning(
+            "instagram_first_party_shadow_failed task_id=%s exception_type=%s",
+            task_id,
+            type(exc).__name__,
+        )
+
+
 async def _check_batch_websites_with_resolver_mode(
     businesses: List[Business],
     resolver_mode: ResolverMode,
     provider: SearchProvider | None,
     *,
     task_id: int | None = None,
+    first_party_mode: str = "off",
+    first_party_resolver_runtime: FirstPartyInstagramResolver | None = None,
 ) -> None:
     """Audit production objects while isolating all shadow resolver mutations."""
+    if first_party_mode not in {"off", "shadow"}:
+        raise ValueError("first_party_mode must be off or shadow")
+    if first_party_mode == "off":
+        first_party_resolver_runtime = None
+    elif first_party_resolver_runtime is None:
+        first_party_resolver_runtime = (
+            instagram_first_party_resolver.build_configured_first_party_resolver()
+        )
+
     if resolver_mode is ResolverMode.OFF:
         await site_checker.check_sites(businesses)
+        if first_party_resolver_runtime is not None:
+            first_party_shadow_businesses = copy.deepcopy(businesses)
+            for item in first_party_shadow_businesses:
+                item.website_original_url = ""
+                item.website_resolution_status = ""
+                item.website_resolved_url = ""
+            await _run_first_party_instagram_shadow(
+                first_party_shadow_businesses,
+                first_party_resolver_runtime,
+                task_id=task_id,
+            )
         return
 
     if resolver_mode is ResolverMode.STRICT:
@@ -192,11 +319,17 @@ async def _check_batch_websites_with_resolver_mode(
             provider=provider,
         )
         await site_checker.check_sites(businesses)
+        if first_party_resolver_runtime is not None:
+            await _run_first_party_instagram_shadow(
+                copy.deepcopy(businesses),
+                first_party_resolver_runtime,
+                task_id=task_id,
+            )
         return
 
     await site_checker.check_sites(businesses)
+    shadow_businesses = copy.deepcopy(businesses)
     try:
-        shadow_businesses = copy.deepcopy(businesses)
         await website_resolver.resolve_business_websites(
             shadow_businesses,
             provider=provider,
@@ -215,6 +348,12 @@ async def _check_batch_websites_with_resolver_mode(
             "website_resolver_shadow_failed task_id=%s exception_type=%s",
             task_id,
             type(exc).__name__,
+        )
+    if first_party_resolver_runtime is not None:
+        await _run_first_party_instagram_shadow(
+            shadow_businesses,
+            first_party_resolver_runtime,
+            task_id=task_id,
         )
 
 
@@ -250,6 +389,7 @@ async def run_search(
     stop_event: Optional[asyncio.Event] = None,
     progress_interval: int = None,
     website_search_provider: SearchProvider | None = None,
+    first_party_resolver_runtime: FirstPartyInstagramResolver | None = None,
 ) -> Optional[str]:
     """Полный цикл поиска для задачи task_id.
 
@@ -280,6 +420,13 @@ async def run_search(
         runtime_website_search_provider = None
     else:
         runtime_website_search_provider = build_configured_search_provider()
+    if config.INSTAGRAM_FIRST_PARTY_MODE == "shadow":
+        runtime_first_party_resolver = (
+            first_party_resolver_runtime
+            or instagram_first_party_resolver.build_configured_first_party_resolver()
+        )
+    else:
+        runtime_first_party_resolver = None
     stop_flag = (lambda: stop_event.is_set()) if stop_event else None
 
     # Накопители по ходу батчевого сбора
@@ -447,6 +594,8 @@ async def run_search(
                         resolver_mode,
                         runtime_website_search_provider,
                         task_id=task_id,
+                        first_party_mode=config.INSTAGRAM_FIRST_PARTY_MODE,
+                        first_party_resolver_runtime=runtime_first_party_resolver,
                     )
                     checked_candidates += len(unique_batch)
 
