@@ -86,8 +86,20 @@ class OpenAIInstagramSearchProviderTests(unittest.IsolatedAsyncioTestCase):
         kwargs = client.responses.create.await_args.kwargs
         self.assertEqual(kwargs["tools"][0]["type"], "web_search")
         self.assertEqual(len(kwargs["tools"]), 1)
+        self.assertEqual(
+            kwargs["tools"][0]["filters"]["allowed_domains"],
+            ["instagram.com"],
+        )
+        self.assertEqual(kwargs["tools"][0]["search_context_size"], "low")
+        self.assertEqual(kwargs["tools"][0]["user_location"], {
+            "type": "approximate",
+            "country": "UA",
+            "city": "Example City",
+        })
+        self.assertTrue(kwargs["tools"][0]["external_web_access"])
         self.assertEqual(kwargs["tool_choice"], "required")
         self.assertEqual(kwargs["max_tool_calls"], 1)
+        self.assertEqual(kwargs["include"], ["web_search_call.action.sources"])
         self.assertFalse(kwargs["store"])
         self.assertEqual(
             kwargs["text"]["format"]["schema"],
@@ -108,13 +120,13 @@ class OpenAIInstagramSearchProviderTests(unittest.IsolatedAsyncioTestCase):
         queries = _suggested_query_variants(request)
         prompt = build_openai_instagram_search_input(request)
         self.assertEqual(queries, (
-            'site:instagram.com "Synthetic Brand" "12025550101"',
-            'site:instagram.com "Synthetic Brand" "Example City"',
-            'site:instagram.com "Synthetic Brand" "synthetic.invalid"',
+            '"Synthetic Brand" "12025550101"',
+            '"Synthetic Brand" "Example City"',
+            '"Synthetic Brand" "synthetic.invalid"',
         ))
         self.assertLessEqual(len(queries), 3)
         self.assertEqual(len(queries), len(set(queries)))
-        self.assertTrue(all(query.startswith("site:instagram.com ") for query in queries))
+        self.assertTrue(all("site:instagram.com" not in query for query in queries))
         self.assertEqual(prompt, build_openai_instagram_search_input(request))
         self.assertNotIn("expected_username", prompt.casefold())
         self.assertNotIn("benchmark", prompt.casefold())
@@ -124,23 +136,45 @@ class OpenAIInstagramSearchProviderTests(unittest.IsolatedAsyncioTestCase):
             self.request(website_url="https://www.synthetic.invalid/path")
         )
         self.assertEqual(queries, (
-            'site:instagram.com "Synthetic Brand" "synthetic.invalid"',
-            'site:instagram.com "Synthetic Brand" "Example City"',
-            'site:instagram.com "Synthetic Brand" "12 Example Avenue"',
+            '"Synthetic Brand" "synthetic.invalid"',
+            '"Synthetic Brand" "Example City"',
+            '"Synthetic Brand" "12 Example Avenue"',
         ))
 
     def test_address_and_name_city_query_fallbacks(self):
         self.assertEqual(
             _suggested_query_variants(self.request()),
             (
-                'site:instagram.com "Synthetic Brand" "Example City"',
-                'site:instagram.com "Synthetic Brand" "12 Example Avenue"',
+                '"Synthetic Brand" "Example City"',
+                '"Synthetic Brand" "12 Example Avenue"',
             ),
         )
         self.assertEqual(
             _suggested_query_variants(self.request(address=None)),
-            ('site:instagram.com "Synthetic Brand" "Example City"',),
+            ('"Synthetic Brand" "Example City"',),
         )
+
+    def test_prompt_enumerates_candidates_for_deterministic_downstream_decision(self):
+        prompt = build_openai_instagram_search_input(self.request()).casefold()
+        self.assertIn("candidate enumerator", prompt)
+        self.assertIn("not the final official-account decision", prompt)
+        self.assertIn("plausible direct instagram profile candidates", prompt)
+        self.assertIn("only return urls visibly present", prompt)
+        self.assertIn("never fabricate", prompt)
+        self.assertIn("posts, reels, stories", prompt)
+        self.assertIn("employees or personal accounts", prompt)
+        self.assertIn("fan pages", prompt)
+        self.assertIn("influencers", prompt)
+        self.assertIn("wrong-city profiles", prompt)
+        self.assertIn("do not omit a plausible direct profile solely because", prompt)
+        self.assertIn("address_matches, phone_matches, and website_domain_matches", prompt)
+        self.assertIn("to false", prompt)
+        self.assertIn("name_matches and city_matches truthfully", prompt)
+        self.assertIn("different_city_detected to true", prompt)
+        self.assertIn("multiple plausible direct profile candidates", prompt)
+        self.assertIn("downstream deterministic code", prompt)
+        self.assertIn("final official-account decision", prompt)
+        self.assertIn("only when no plausible direct instagram profile", prompt)
 
     async def test_source_bound_candidate_is_returned_with_all_evidence(self):
         item = result_item(phone_matches=True, website_domain_matches=True)
@@ -246,6 +280,19 @@ class OpenAIInstagramSearchProviderTests(unittest.IsolatedAsyncioTestCase):
         telemetry = provider.telemetry()
         self.assertEqual(telemetry.source_bound_candidates_returned, 1)
         self.assertEqual(telemetry.source_unbound_candidates_discarded, 1)
+
+    async def test_multiple_source_bound_candidates_are_returned_downstream(self):
+        other = "https://www.instagram.com/other_synthetic/"
+        provider = OpenAIInstagramSearchProvider(
+            self.settings(),
+            FakeClient(response(
+                [result_item(), result_item(instagram_url=other)],
+                sources=(PROFILE, other),
+            )),
+        )
+        results = await provider.search(self.request())
+        self.assertEqual(tuple(item.url for item in results), (PROFILE, other))
+        self.assertEqual(provider.telemetry().source_bound_candidates_returned, 2)
 
     async def test_identity_prefilter_and_different_city_reject(self):
         items = (

@@ -190,27 +190,27 @@ def _suggested_query_variants(request: InstagramSearchRequest) -> tuple[str, ...
     candidates: list[str] = []
     if phone is not None:
         candidates.extend((
-            f'site:instagram.com "{name}" "{phone}"',
-            f'site:instagram.com "{name}" "{city}"',
+            f'"{name}" "{phone}"',
+            f'"{name}" "{city}"',
         ))
         if domain is not None:
-            candidates.append(f'site:instagram.com "{name}" "{domain}"')
+            candidates.append(f'"{name}" "{domain}"')
         elif address is not None:
-            candidates.append(f'site:instagram.com "{name}" "{address}"')
+            candidates.append(f'"{name}" "{address}"')
     elif domain is not None:
         candidates.extend((
-            f'site:instagram.com "{name}" "{domain}"',
-            f'site:instagram.com "{name}" "{city}"',
+            f'"{name}" "{domain}"',
+            f'"{name}" "{city}"',
         ))
         if address is not None:
-            candidates.append(f'site:instagram.com "{name}" "{address}"')
+            candidates.append(f'"{name}" "{address}"')
     elif address is not None:
         candidates.extend((
-            f'site:instagram.com "{name}" "{city}"',
-            f'site:instagram.com "{name}" "{address}"',
+            f'"{name}" "{city}"',
+            f'"{name}" "{address}"',
         ))
     else:
-        candidates.append(f'site:instagram.com "{name}" "{city}"')
+        candidates.append(f'"{name}" "{city}"')
     return tuple(dict.fromkeys(candidates))[:3]
 
 
@@ -235,20 +235,26 @@ def build_openai_instagram_search_input(request: InstagramSearchRequest) -> str:
         for index, query in enumerate(_suggested_query_variants(request), start=1)
     )
     instructions = (
-        "Find only the official Instagram profile for this exact business. Perform "
-        "exactly one web search action using the direct Instagram-profile-targeted "
-        "query variants below. Do not use open_page or find_in_page. A search result "
-        "used as a candidate must itself be a direct instagram.com/<username>/ "
-        "profile source; never use /p/, /reel/, /stories/, hashtags, explore, login, "
-        "or account routes. Never infer a profile solely from an official website "
-        "mention when no direct profile is present in search sources. Code-enforced "
-        "source binding is mandatory: if no direct profile source exists, return no "
-        "verified candidate. Do not fabricate profile URLs. Exclude fan pages, "
-        "employees, influencers, and same-name wrong-city businesses. Business "
-        "identity and city must match. Exact phone, website domain, and address are "
-        "strong corroborators. If uncertain, return no candidate. Set identity "
-        "booleans only from web-search source evidence; the deterministic matcher "
-        "remains final authority.\n\nSuggested query variants:\n" + queries
+        "Act as a candidate enumerator, not the final official-account decision "
+        "maker. Perform exactly one web search action using the identity query "
+        "variants below; the tool is restricted to Instagram sources. Do not use "
+        "open_page or find_in_page. Return plausible direct Instagram profile "
+        "candidates associated with the requested business and city when they are "
+        "present in the actual search results. Only return URLs visibly present as "
+        "direct instagram.com/<username>/ profile results. Never fabricate an "
+        "Instagram URL. Exclude posts, reels, stories, employees or personal "
+        "accounts, fan pages, influencers, clearly unrelated same-name businesses, "
+        "and clearly wrong-city profiles. Do not omit a plausible direct profile "
+        "solely because address, phone, or website-domain evidence is incomplete; "
+        "instead set address_matches, phone_matches, and website_domain_matches to "
+        "false whenever the corresponding match is not supported. Set name_matches "
+        "and city_matches truthfully from the available search evidence. Set "
+        "different_city_detected to true when conflicting city evidence is evident. "
+        "It is acceptable to return multiple plausible direct profile candidates; "
+        "downstream deterministic code performs source binding, identity prefiltering, "
+        "matching, ambiguity resolution, and the final official-account decision. "
+        "Return an empty results list only when no plausible direct Instagram profile "
+        "result is present.\n\nSuggested identity query variants:\n" + queries
     )
     return ("\n".join(lines) + "\n\n" + instructions)[:_INPUT_LIMIT].rstrip()
 
@@ -570,6 +576,9 @@ class OpenAIInstagramSearchProvider(InstagramSearchProvider):
                 reasoning={"effort": self._settings.reasoning_effort},
                 tools=[{
                     "type": "web_search",
+                    "filters": {
+                        "allowed_domains": ["instagram.com"],
+                    },
                     "search_context_size": self._settings.search_context_size,
                     "user_location": {
                         "type": "approximate",
