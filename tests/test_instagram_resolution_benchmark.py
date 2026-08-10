@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 from agents.openai_instagram_search_provider import (
@@ -28,6 +29,7 @@ from instagram_resolution_benchmark import (
     run_benchmark,
     run_benchmark_case,
     summarize_benchmark,
+    write_benchmark_outputs,
 )
 
 
@@ -129,6 +131,12 @@ def _result(
     candidates_returned: int = 1,
     identity_candidates_rejected: int = 0,
     sources_seen: int = 1,
+    structured_candidates_seen: int = 0,
+    identity_prefilter_rejected: int = 0,
+    direct_profile_sources_seen: int = 0,
+    invalid_profile_candidates_discarded: int = 0,
+    source_unbound_candidates_discarded: int = 0,
+    source_bound_candidates_returned: int = 0,
 ) -> InstagramBenchmarkCaseResult:
     return InstagramBenchmarkCaseResult(**locals())
 
@@ -272,6 +280,65 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.error_category, "timeout")
         self.assertNotIn("sensitive raw detail", repr(result))
 
+    async def test_safe_provider_telemetry_persists_per_case(self):
+        class TelemetryProvider(FakeProvider):
+            def __init__(self):
+                super().__init__(((),))
+                self.values = {
+                    "requests_started": 0,
+                    "tool_calls_seen": 0,
+                    "search_actions_seen": 0,
+                    "open_page_actions_seen": 0,
+                    "find_in_page_actions_seen": 0,
+                    "candidates_returned": 0,
+                    "identity_candidates_rejected": 0,
+                    "sources_seen": 0,
+                    "structured_candidates_seen": 0,
+                    "identity_prefilter_rejected": 0,
+                    "direct_profile_sources_seen": 0,
+                    "invalid_profile_candidates_discarded": 0,
+                    "source_unbound_candidates_discarded": 0,
+                    "source_bound_candidates_returned": 0,
+                    "tool_call_limit_exceeded": False,
+                }
+
+            def telemetry(self):
+                return SimpleNamespace(**self.values)
+
+            async def search(self, request):
+                self.values.update({
+                    "requests_started": 1,
+                    "tool_calls_seen": 1,
+                    "search_actions_seen": 1,
+                    "sources_seen": 3,
+                    "structured_candidates_seen": 4,
+                    "identity_candidates_rejected": 1,
+                    "identity_prefilter_rejected": 1,
+                    "direct_profile_sources_seen": 1,
+                    "invalid_profile_candidates_discarded": 1,
+                    "source_unbound_candidates_discarded": 2,
+                    "source_bound_candidates_returned": 0,
+                })
+                return await super().search(request)
+
+        result = await run_benchmark_case(_case(), TelemetryProvider())
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "result.json"
+            metrics = summarize_benchmark((result,))
+            write_benchmark_outputs(
+                output,
+                (result,),
+                metrics,
+                InstagramBenchmarkGateDecision.FAIL_DATASET_SHAPE,
+            )
+            persisted = json.loads(output.read_text(encoding="utf-8"))["results"][0]
+        self.assertEqual(persisted["structured_candidates_seen"], 4)
+        self.assertEqual(persisted["identity_prefilter_rejected"], 1)
+        self.assertEqual(persisted["direct_profile_sources_seen"], 1)
+        self.assertEqual(persisted["invalid_profile_candidates_discarded"], 1)
+        self.assertEqual(persisted["source_unbound_candidates_discarded"], 2)
+        self.assertEqual(persisted["source_bound_candidates_returned"], 0)
+
 
 class MetricsTests(unittest.TestCase):
     def test_recall_precision_specificity_and_technical_rate(self):
@@ -371,6 +438,53 @@ class GateTests(unittest.TestCase):
                 candidates_returned=0,
             )
         self.assertIs(self._decision(results), InstagramBenchmarkGateDecision.FAIL_RECALL)
+
+    def test_zero_promotions_fail_recall(self):
+        results = list(_passing_results())
+        for index in range(8):
+            results[index] = replace(
+                results[index],
+                resolution_status="not_found",
+                resolved_username=None,
+                correct_promotion=False,
+                safe_nonpromotion=True,
+                candidates_returned=0,
+            )
+        self.assertIs(
+            self._decision(results),
+            InstagramBenchmarkGateDecision.FAIL_RECALL,
+        )
+
+    def test_specificity_failure_precedes_recall(self):
+        results = list(_passing_results())
+        for index in range(8):
+            results[index] = replace(
+                results[index],
+                resolution_status="not_found",
+                resolved_username=None,
+                correct_promotion=False,
+                safe_nonpromotion=True,
+                candidates_returned=0,
+            )
+        results[8] = replace(
+            results[8],
+            resolution_status="resolution_error",
+            safe_nonpromotion=False,
+            technical_success=False,
+            error_category="timeout",
+        )
+        self.assertIs(
+            self._decision(results),
+            InstagramBenchmarkGateDecision.FAIL_SPECIFICITY,
+        )
+
+    def test_recall_pass_with_low_precision_fails_precision(self):
+        results = _passing_results()
+        metrics = replace(summarize_benchmark(results), promotion_precision=0.90)
+        self.assertIs(
+            evaluate_benchmark_gate(metrics, results),
+            InstagramBenchmarkGateDecision.FAIL_PRECISION,
+        )
 
     def test_fails_technical_below_point_nine(self):
         results = list(_passing_results())
@@ -491,7 +605,7 @@ class LeakageAndShaTests(unittest.IsolatedAsyncioTestCase):
                 lambda: provider,
                 expected_dataset_sha256=hashlib.sha256(raw).hexdigest(),
             )
-            self.assertIs(decision, InstagramBenchmarkGateDecision.FAIL_PRECISION)
+            self.assertIs(decision, InstagramBenchmarkGateDecision.FAIL_RECALL)
             self.assertEqual(len(provider.requests), 12)
             self.assertTrue(output.exists())
             self.assertTrue(output.with_suffix(".txt").exists())
@@ -520,6 +634,12 @@ class SecurityContractTests(unittest.TestCase):
                 "candidates_returned",
                 "identity_candidates_rejected",
                 "sources_seen",
+                "structured_candidates_seen",
+                "identity_prefilter_rejected",
+                "direct_profile_sources_seen",
+                "invalid_profile_candidates_discarded",
+                "source_unbound_candidates_discarded",
+                "source_bound_candidates_returned",
             ),
         )
         source = Path(__import__("instagram_resolution_benchmark").__file__).read_text(

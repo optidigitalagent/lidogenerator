@@ -138,6 +138,15 @@ class OpenAIInstagramSearchSettings:
 
 @dataclass(frozen=True)
 class OpenAIInstagramSearchTelemetry:
+    """Aggregate safe counters; no candidate identity or source text is retained.
+
+    ``sources_seen`` counts source URL fields, while ``direct_profile_sources_seen``
+    counts the subset that normalize as direct profiles. Structured candidates are
+    counted before the identity prefilter. Invalid and source-unbound discard counters
+    apply only after that prefilter. The legacy rejection/return counters mirror
+    ``identity_prefilter_rejected`` and ``source_bound_candidates_returned``.
+    """
+
     requests_started: int
     requests_succeeded: int
     requests_failed: int
@@ -151,6 +160,12 @@ class OpenAIInstagramSearchTelemetry:
     candidates_returned: int
     tool_call_limit_exceeded: bool
     last_error_category: str | None = None
+    structured_candidates_seen: int = 0
+    identity_prefilter_rejected: int = 0
+    direct_profile_sources_seen: int = 0
+    invalid_profile_candidates_discarded: int = 0
+    source_unbound_candidates_discarded: int = 0
+    source_bound_candidates_returned: int = 0
 
 
 def _clean(value: str) -> str:
@@ -175,25 +190,27 @@ def _suggested_query_variants(request: InstagramSearchRequest) -> tuple[str, ...
     candidates: list[str] = []
     if phone is not None:
         candidates.extend((
-            f'"{name}" "{phone}" Instagram',
-            f'"{name}" "{city}" Instagram',
+            f'site:instagram.com "{name}" "{phone}"',
+            f'site:instagram.com "{name}" "{city}"',
+        ))
+        if domain is not None:
+            candidates.append(f'site:instagram.com "{name}" "{domain}"')
+        elif address is not None:
+            candidates.append(f'site:instagram.com "{name}" "{address}"')
+    elif domain is not None:
+        candidates.extend((
+            f'site:instagram.com "{name}" "{domain}"',
+            f'site:instagram.com "{name}" "{city}"',
         ))
         if address is not None:
-            candidates.append(f'"{name}" "{address}" Instagram')
-        elif domain is not None:
-            candidates.append(f'"{name}" "{domain}" Instagram')
-    elif domain is not None:
-        candidates.append(f'"{name}" "{domain}" Instagram')
-        if address is not None:
-            candidates.append(f'"{name}" "{city}" "{address}" Instagram')
-        candidates.append(f'"{name}" "{city}" Instagram')
+            candidates.append(f'site:instagram.com "{name}" "{address}"')
     elif address is not None:
         candidates.extend((
-            f'"{name}" "{city}" "{address}" Instagram',
-            f'"{name}" "{city}" Instagram',
+            f'site:instagram.com "{name}" "{city}"',
+            f'site:instagram.com "{name}" "{address}"',
         ))
     else:
-        candidates.append(f'"{name}" "{city}" Instagram')
+        candidates.append(f'site:instagram.com "{name}" "{city}"')
     return tuple(dict.fromkeys(candidates))[:3]
 
 
@@ -219,16 +236,19 @@ def build_openai_instagram_search_input(request: InstagramSearchRequest) -> str:
     )
     instructions = (
         "Find only the official Instagram profile for this exact business. Perform "
-        "exactly one web search action; place the focused query variants below in "
-        "that action. Do not use open_page or find_in_page. Return only direct "
-        "Instagram profile URLs, never posts, reels, stories, hashtags, explore, "
-        "login, or account routes. Exclude fan pages, employees, influencers, and "
-        "similarly named businesses. Business identity and city must match. Mark "
-        "and exclude a different-city same-name candidate. Exact phone, website "
-        "domain, and address are strong corroborators. Never invent a URL or infer "
-        "ownership from a username alone. If uncertain, return no candidate. Set "
-        "identity booleans only from web-search source evidence; the deterministic "
-        "matcher remains final authority.\n\nSuggested query variants:\n" + queries
+        "exactly one web search action using the direct Instagram-profile-targeted "
+        "query variants below. Do not use open_page or find_in_page. A search result "
+        "used as a candidate must itself be a direct instagram.com/<username>/ "
+        "profile source; never use /p/, /reel/, /stories/, hashtags, explore, login, "
+        "or account routes. Never infer a profile solely from an official website "
+        "mention when no direct profile is present in search sources. Code-enforced "
+        "source binding is mandatory: if no direct profile source exists, return no "
+        "verified candidate. Do not fabricate profile URLs. Exclude fan pages, "
+        "employees, influencers, and same-name wrong-city businesses. Business "
+        "identity and city must match. Exact phone, website domain, and address are "
+        "strong corroborators. If uncertain, return no candidate. Set identity "
+        "booleans only from web-search source evidence; the deterministic matcher "
+        "remains final authority.\n\nSuggested query variants:\n" + queries
     )
     return ("\n".join(lines) + "\n\n" + instructions)[:_INPUT_LIMIT].rstrip()
 
@@ -400,6 +420,12 @@ class OpenAIInstagramSearchProvider(InstagramSearchProvider):
         self._sources_seen = 0
         self._identity_candidates_rejected = 0
         self._candidates_returned = 0
+        self._structured_candidates_seen = 0
+        self._identity_prefilter_rejected = 0
+        self._direct_profile_sources_seen = 0
+        self._invalid_profile_candidates_discarded = 0
+        self._source_unbound_candidates_discarded = 0
+        self._source_bound_candidates_returned = 0
         self._tool_call_limit_exceeded = False
         self._last_error_category: str | None = None
 
@@ -409,12 +435,29 @@ class OpenAIInstagramSearchProvider(InstagramSearchProvider):
 
     def telemetry(self) -> OpenAIInstagramSearchTelemetry:
         return OpenAIInstagramSearchTelemetry(
-            self._requests_started, self._requests_succeeded, self._requests_failed,
-            self._tool_calls_seen, self._search_actions_seen,
-            self._open_page_actions_seen, self._find_in_page_actions_seen,
-            self._unknown_actions_seen, self._sources_seen,
-            self._identity_candidates_rejected, self._candidates_returned,
-            self._tool_call_limit_exceeded, self._last_error_category,
+            requests_started=self._requests_started,
+            requests_succeeded=self._requests_succeeded,
+            requests_failed=self._requests_failed,
+            tool_calls_seen=self._tool_calls_seen,
+            search_actions_seen=self._search_actions_seen,
+            open_page_actions_seen=self._open_page_actions_seen,
+            find_in_page_actions_seen=self._find_in_page_actions_seen,
+            unknown_actions_seen=self._unknown_actions_seen,
+            sources_seen=self._sources_seen,
+            identity_candidates_rejected=self._identity_candidates_rejected,
+            candidates_returned=self._candidates_returned,
+            tool_call_limit_exceeded=self._tool_call_limit_exceeded,
+            last_error_category=self._last_error_category,
+            structured_candidates_seen=self._structured_candidates_seen,
+            identity_prefilter_rejected=self._identity_prefilter_rejected,
+            direct_profile_sources_seen=self._direct_profile_sources_seen,
+            invalid_profile_candidates_discarded=(
+                self._invalid_profile_candidates_discarded
+            ),
+            source_unbound_candidates_discarded=(
+                self._source_unbound_candidates_discarded
+            ),
+            source_bound_candidates_returned=self._source_bound_candidates_returned,
         )
 
     def _process_response(
@@ -459,6 +502,7 @@ class OpenAIInstagramSearchProvider(InstagramSearchProvider):
                     source_keys.add(normalize_instagram_username(url))
                 except (TypeError, ValueError):
                     continue
+                self._direct_profile_sources_seen += 1
         self._tool_calls_seen += tool_calls
         self._sources_seen += sources_seen
         if tool_calls > 1:
@@ -468,14 +512,15 @@ class OpenAIInstagramSearchProvider(InstagramSearchProvider):
         if tool_calls == 0:
             raise InstagramSearchProviderError("OpenAI Instagram search tool was not called")
 
+        payload = _validated_payload(_field(response, "output_text"))
+        self._structured_candidates_seen += len(payload)
         eligible: list[dict[str, object]] = []
-        for item in _validated_payload(_field(response, "output_text")):
+        for item in payload:
             if _identity_prefilter_allows(item, request):
                 eligible.append(item)
             else:
                 self._identity_candidates_rejected += 1
-        if eligible and not source_keys:
-            raise InstagramSearchProviderError("OpenAI Instagram search returned unverified candidates")
+                self._identity_prefilter_rejected += 1
 
         results: list[InstagramSearchResult] = []
         seen: set[str] = set()
@@ -485,8 +530,12 @@ class OpenAIInstagramSearchProvider(InstagramSearchProvider):
                 url = normalize_instagram_profile_url(item["instagram_url"])
                 identity_key = normalize_instagram_username(url)
             except (TypeError, ValueError):
+                self._invalid_profile_candidates_discarded += 1
                 continue
-            if identity_key not in source_keys or identity_key in seen:
+            if identity_key not in source_keys:
+                self._source_unbound_candidates_discarded += 1
+                continue
+            if identity_key in seen:
                 continue
             seen.add(identity_key)
             results.append(InstagramSearchResult(
@@ -504,6 +553,7 @@ class OpenAIInstagramSearchProvider(InstagramSearchProvider):
                     candidate_url_source_bound=True,
                 ),
             ))
+            self._source_bound_candidates_returned += 1
             if len(results) >= limit:
                 break
         return tuple(results)
