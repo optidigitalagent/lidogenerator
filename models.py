@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """Единый формат данных между агентами — датакласс Business."""
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass
 from typing import Optional
 
+import config
+from contactability import Contactability, ContactChannel, contactability_from_business
 from website_pipeline import LeadDecision
 
 
@@ -87,15 +89,27 @@ class Business:
         return self.website_resolved_url or self.website_original_url or self.website
 
     @property
-    def is_lead(self) -> bool:
-        """Лид = есть Instagram И (сайта нет ИЛИ сайт плохой).
+    def contactability(self) -> Contactability:
+        return contactability_from_business(self)
 
-        Бизнес с хорошим сайтом отсеивается, даже если Instagram отличный.
-        Бизнес без Instagram отсеивается — связываться будем через Instagram.
-        """
+    @property
+    def has_actionable_contact(self) -> bool:
+        return self.contactability.actionable
+
+    @property
+    def preferred_contact_channel(self) -> ContactChannel | None:
+        return self.contactability.preferred_channel
+
+    @property
+    def is_lead(self) -> bool:
+        """Require website need and the contact allowed by the active mode."""
         if self.lead_decision:
             return self.lead_decision == LeadDecision.LEAD.value
-        if not self.instagram_url:
+        if config.LEAD_CONTACTABILITY_MODE == "instagram_only":
+            has_contact = bool(self.instagram_url)
+        else:
+            has_contact = self.has_actionable_contact
+        if not has_contact:
             return False
         return self.website_status in ("no website", "bad website")
 

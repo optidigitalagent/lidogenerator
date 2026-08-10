@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Reporter — экспорт лидов в CSV.
 
-В таблицу попадают ТОЛЬКО лиды (есть Instagram И нет сайта/сайт плохой) —
-бизнесы с хорошими сайтами и без Instagram отсеиваются.
+В таблицу попадают ТОЛЬКО квалифицированные лиды: бизнесу нужен сайт и у него
+есть разрешённый текущим режимом канал связи.
 
 Экспорт включает основные поля лида и детерминированные resolver/audit evidence,
 но не включает HTML, provider payloads или секреты.
@@ -15,16 +15,31 @@
 import csv
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, List
+from typing import List
 
 import config
+from contactability import normalized_instagram_profile
 from models import Business
 
 # Колонки CSV: (заголовок, как достать значение из Business)
 COLUMNS = [
     ("Business Name", lambda b: b.name),
     ("City", lambda b: b.city),
+    ("Phone", lambda b: b.contactability.normalized_phone or ""),
+    ("Email", lambda b: b.contactability.normalized_email or ""),
     ("Instagram URL", lambda b: b.instagram_url),
+    (
+        "Preferred Contact",
+        lambda b: (
+            b.preferred_contact_channel.value
+            if b.preferred_contact_channel is not None
+            else ""
+        ),
+    ),
+    (
+        "Contact Channels",
+        lambda b: ",".join(channel.value for channel in b.contactability.channels),
+    ),
     ("Website URL", lambda b: b.effective_website_url),
     ("Website Status", lambda b: b.website_status),
     ("Resolution Status", lambda b: b.website_resolution_status),
@@ -60,18 +75,22 @@ def export_csv(businesses: List[Business], task_id: int = 0) -> str:
 
 # Ширина колонок Excel (в символах) — чтобы всё было нормально видно
 EXCEL_WIDTHS = {
-    "A": 42,   # Business Name — пошире
-    "B": 20,   # City — нормальная ширина
-    "C": 40,   # Instagram URL — пошире
-    "D": 45,   # Website URL
-    "E": 20,   # Website Status
-    "F": 22,   # Resolution Status
-    "G": 20,   # Resolution Source
-    "H": 22,   # Resolution Confidence
-    "I": 60,   # Resolution Evidence
-    "J": 36,   # Resolution Error
-    "K": 18,   # Lead Decision
-    "L": 34,   # Lead Decision Reason
+    "A": 42,
+    "B": 20,
+    "C": 22,
+    "D": 34,
+    "E": 40,
+    "F": 20,
+    "G": 30,
+    "H": 45,
+    "I": 20,
+    "J": 22,
+    "K": 20,
+    "L": 22,
+    "M": 60,
+    "N": 36,
+    "O": 18,
+    "P": 34,
 }
 
 
@@ -121,31 +140,45 @@ def export_excel(businesses: List[Business], task_id: int = 0) -> str:
 
 
 def format_leads_summary(businesses: List[Business], limit: int = 20) -> str:
-    """Короткий список лидов для Telegram. Без скоринга и лишних описаний.
+    """Format qualified leads with at least one usable contact per entry."""
 
-    Формат одного лида:
-        Назва: ...
-        Місто: ...
-        Instagram: ...
-        Статус сайту: no website / bad website
-    """
-    leads = [b for b in businesses if b.is_lead]
-    leads.sort(key=lambda b: 0 if b.website_status == "no website" else 1)
+    leads = [business for business in businesses if business.is_lead]
+    leads.sort(key=lambda business: 0 if business.website_status == "no website" else 1)
     if not leads:
-        return "Якісних лідів не знайдено (усі або з нормальним сайтом, або без Instagram)."
+        ending = (
+            "усі або з нормальним сайтом, або без доступного контакту"
+            if config.LEAD_CONTACTABILITY_MODE == "multi_channel"
+            else "усі або з нормальним сайтом, або без Instagram"
+        )
+        return f"Якісних лідів не знайдено ({ending})."
 
     blocks = []
-    for b in leads[:limit]:
+    for business in leads[:limit]:
+        contactability = business.contactability
+        contact_lines = []
+        if contactability.instagram_available:
+            contact_lines.append(
+                f"Instagram: {normalized_instagram_profile(business.instagram_url)}"
+            )
+        elif (
+            config.LEAD_CONTACTABILITY_MODE == "instagram_only"
+            and business.instagram_url
+        ):
+            contact_lines.append(f"Instagram: {business.instagram_url}")
+        if contactability.normalized_phone:
+            contact_lines.append(f"Телефон: {contactability.normalized_phone}")
+        if contactability.normalized_email:
+            contact_lines.append(f"Email: {contactability.normalized_email}")
         website_line = (
-            f"\nWebsite: {b.effective_website_url}"
-            if b.effective_website_url
+            f"\nWebsite: {business.effective_website_url}"
+            if business.effective_website_url
             else ""
         )
         blocks.append(
-            f"Назва: {b.name}\n"
-            f"Місто: {b.city}\n"
-            f"Instagram: {b.instagram_url}\n"
-            f"Статус сайту: {b.website_status}"
+            f"Назва: {business.name}\n"
+            f"Місто: {business.city}\n"
+            f"{chr(10).join(contact_lines)}\n"
+            f"Статус сайту: {business.website_status}"
             f"{website_line}"
         )
     text = "\n\n".join(blocks)

@@ -9,7 +9,8 @@ from models import Business
 
 
 HEADERS = [
-    "Business Name", "City", "Instagram URL", "Website URL", "Website Status",
+    "Business Name", "City", "Phone", "Email", "Instagram URL",
+    "Preferred Contact", "Contact Channels", "Website URL", "Website Status",
     "Resolution Status", "Resolution Source", "Resolution Confidence",
     "Resolution Evidence", "Resolution Error", "Lead Decision", "Lead Decision Reason",
 ]
@@ -52,9 +53,11 @@ class ReporterEvidenceTests(unittest.TestCase):
             rows = list(csv.reader(handle, delimiter=";"))
         self.assertEqual(rows[0], HEADERS)
         self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[1][3], "https://official.example/")
-        self.assertEqual(rows[1][7], "0.750")
-        self.assertEqual(rows[1][8], '[{"schema_version":1}]')
+        self.assertEqual(rows[1][4], "https://instagram.com/alpha")
+        self.assertEqual(rows[1][5:7], ["instagram", "instagram"])
+        self.assertEqual(rows[1][7], "https://official.example/")
+        self.assertEqual(rows[1][11], "0.750")
+        self.assertEqual(rows[1][12], '[{"schema_version":1}]')
 
     def test_excel_matches_csv_contract(self):
         try:
@@ -67,13 +70,39 @@ class ReporterEvidenceTests(unittest.TestCase):
         rows = list(sheet.iter_rows(values_only=True))
         workbook.close()
         self.assertEqual(list(rows[0]), HEADERS)
-        self.assertEqual(rows[1][3], "https://official.example/")
-        self.assertEqual(rows[1][7], "0.750")
+        self.assertEqual(rows[1][7], "https://official.example/")
+        self.assertEqual(rows[1][11], "0.750")
 
     def test_telegram_is_concise_and_includes_effective_url(self):
         text = reporter.format_leads_summary([lead()])
         self.assertIn("Website: https://official.example/", text)
         self.assertNotIn("schema_version", text)
+
+    def test_telegram_shows_phone_email_and_preferred_channel_first(self):
+        phone_only = Business(name="Phone", city="Kyiv", phone="050 123 45 67")
+        email_only = Business(name="Email", city="Kyiv", email="hello@business.ua")
+        multiple = Business(
+            name="Multiple",
+            city="Kyiv",
+            instagram_url="https://instagram.com/multiple/",
+            phone="050 234 56 78",
+            email="team@business.ua",
+        )
+        with patch.object(reporter.config, "LEAD_CONTACTABILITY_MODE", "multi_channel"):
+            text = reporter.format_leads_summary([phone_only, email_only, multiple])
+        self.assertIn("Телефон: 0501234567", text)
+        self.assertIn("Email: hello@business.ua", text)
+        multiple_block = next(
+            block for block in text.split("\n\n") if "Назва: Multiple" in block
+        )
+        self.assertLess(multiple_block.index("Instagram:"), multiple_block.index("Телефон:"))
+        self.assertLess(multiple_block.index("Телефон:"), multiple_block.index("Email:"))
+
+    def test_multi_channel_no_lead_message_is_not_instagram_only(self):
+        with patch.object(reporter.config, "LEAD_CONTACTABILITY_MODE", "multi_channel"):
+            text = reporter.format_leads_summary([])
+        self.assertIn("без доступного контакту", text)
+        self.assertNotIn("без Instagram", text)
 
 
 if __name__ == "__main__":

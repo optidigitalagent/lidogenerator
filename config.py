@@ -51,6 +51,14 @@ WEBSITE_RESOLVER_MODE = os.getenv("WEBSITE_RESOLVER_MODE", "shadow").strip().cas
 if WEBSITE_RESOLVER_MODE not in {"off", "shadow", "strict"}:
     raise ValueError("WEBSITE_RESOLVER_MODE must be one of: off, shadow, strict")
 
+LEAD_CONTACTABILITY_MODE = os.getenv(
+    "LEAD_CONTACTABILITY_MODE", "instagram_only"
+).strip().casefold()
+if LEAD_CONTACTABILITY_MODE not in {"instagram_only", "multi_channel"}:
+    raise ValueError(
+        "LEAD_CONTACTABILITY_MODE must be one of: instagram_only, multi_channel"
+    )
+
 
 def _environment_integer(
     name: str,

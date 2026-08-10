@@ -156,6 +156,17 @@ class OptiPayloadTests(unittest.TestCase):
         self.assertIsNone(payload["leads"][0]["email"])
         self.assertIsNone(payload["leads"][0]["websiteUrl"])
 
+    def test_phone_only_lead_serializes_with_null_instagram(self):
+        payload = build_payload(
+            task(),
+            [business(instagram_url="", email="")],
+            generated_at=NOW,
+        )
+        serialized = serialize_payload(payload)
+        lead = json.loads(serialized)["leads"][0]
+        self.assertEqual(lead["phone"], "+380 44 123 45 67")
+        self.assertIsNone(lead["instagramUrl"])
+
     def test_build_boundary_canonicalizes_or_drops_source_urls(self):
         payload = build_payload(
             task(),

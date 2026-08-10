@@ -24,6 +24,7 @@ from typing import Awaitable, Callable, List, Optional
 import city_catalog
 import config
 import db
+from contactability import ContactChannel, lead_contact_bucket
 from agents import (
     ai_scorer,
     collector,
@@ -62,6 +63,68 @@ from search_policy import (
 # Callback наружу (в Telegram): принимает готовый текст сообщения (на украинском)
 ReportCallback = Callable[[str], Awaitable[None]]
 log = logging.getLogger("lead_hunter.orchestrator")
+
+
+def _qualification_contact_available(business: Business) -> bool:
+    if config.LEAD_CONTACTABILITY_MODE == "instagram_only":
+        return bool(business.instagram_url)
+    return business.has_actionable_contact
+
+
+def _contactability_qualification_telemetry(
+    candidates: List[Business],
+    leads: List[Business],
+    *,
+    task_id: int | None,
+) -> dict[str, object]:
+    candidate_contactability = [business.contactability for business in candidates]
+    lead_buckets = [lead_contact_bucket(business) for business in leads]
+    return {
+        "event": "contactability_qualification",
+        "task_id": task_id,
+        "mode": config.LEAD_CONTACTABILITY_MODE,
+        "candidate_count": len(candidates),
+        "website_need_count": sum(
+            business.website_status in {"no website", "bad website"}
+            for business in candidates
+        ),
+        "actionable_contact_count": sum(
+            contactability.actionable for contactability in candidate_contactability
+        ),
+        "instagram_contact_count": sum(
+            ContactChannel.INSTAGRAM in contactability.channels
+            for contactability in candidate_contactability
+        ),
+        "phone_contact_count": sum(
+            ContactChannel.PHONE in contactability.channels
+            for contactability in candidate_contactability
+        ),
+        "email_contact_count": sum(
+            ContactChannel.EMAIL in contactability.channels
+            for contactability in candidate_contactability
+        ),
+        "lead_instagram_count": lead_buckets.count("instagram"),
+        "lead_phone_only_count": lead_buckets.count("phone_only"),
+        "lead_email_only_count": lead_buckets.count("email_only"),
+        "lead_multi_contact_count": lead_buckets.count("multi_contact"),
+        "no_contact_count": sum(
+            not contactability.actionable
+            for contactability in candidate_contactability
+        ),
+        "good_site_excluded_count": sum(
+            business.has_actionable_contact
+            and business.website_status == "good website"
+            for business in candidates
+        ),
+        "uncertain_site_excluded_count": sum(
+            business.has_actionable_contact
+            and (
+                business.website_status == "uncertain website"
+                or business.lead_decision == LeadDecision.UNCERTAIN.value
+            )
+            for business in candidates
+        ),
+    }
 
 
 def _normalized_text(value: str) -> str:
@@ -574,6 +637,8 @@ async def run_search(
     visited = 0                         # просмотрено бизнесов всего
     checked_candidates = 0              # уникальные кандидаты с завершённой проверкой сайта
     first_party_instagrams_recovered = 0
+    contactability_candidates: List[Business] = []
+    skipped_no_contact = 0
     skipped_no_instagram = 0            # пропущено: нет Instagram
     skipped_good_site = 0               # пропущено: есть Instagram, но хороший сайт
     skipped_uncertain_website = 0       # пропущено: результат сайта недостаточно надёжен
@@ -622,6 +687,31 @@ async def run_search(
         added_bad_site = sum(1 for b in leads if b.website_status == "bad website")
         return added_no_site, added_bad_site
 
+    def _contactability_progress_lines() -> str:
+        if config.LEAD_CONTACTABILITY_MODE == "instagram_only":
+            return f"Пропущено без Instagram: {skipped_no_instagram}\n"
+        instagram_leads = sum(
+            business.contactability.instagram_available for business in leads
+        )
+        phone_only_leads = sum(
+            lead_contact_bucket(business) == "phone_only" for business in leads
+        )
+        email_only_leads = sum(
+            lead_contact_bucket(business) == "email_only" for business in leads
+        )
+        multi_contact_leads = sum(
+            lead_contact_bucket(business) == "multi_contact" for business in leads
+        )
+        return (
+            "Контактні ліди:\n"
+            f"- Instagram: {instagram_leads}\n"
+            f"- Тільки телефон: {phone_only_leads}\n"
+            f"- Тільки email: {email_only_leads}\n"
+            f"- Кілька каналів: {multi_contact_leads}\n"
+            "Пропущено без доступного контакту: "
+            f"{skipped_no_contact}\n"
+        )
+
     async def _update_website_search_budget_progress() -> None:
         snapshot = search_budget_snapshot(runtime_website_search_provider)
         if snapshot is not None:
@@ -646,7 +736,7 @@ async def run_search(
             f"Відкрито карток Google Maps: {visited}/{policy.max_discovery_cards}\n"
             f"Перевірено унікальних кандидатів: {checked_candidates}/{policy.max_candidates}\n"
             f"Знайдено валідних лідів: {len(leads)}/{target_leads}\n"
-            f"Пропущено без Instagram: {skipped_no_instagram}\n"
+            f"{_contactability_progress_lines()}"
             f"{first_party_recovery_line}"
             f"Пропущено з гарним сайтом: {skipped_good_site}\n"
             f"Пропущено через невизначений статус сайту: {skipped_uncertain_website}\n"
@@ -756,11 +846,14 @@ async def run_search(
                             if business.instagram_url
                         )
                     checked_candidates += len(unique_batch)
+                    contactability_candidates.extend(unique_batch)
 
                     if resolver_mode is ResolverMode.STRICT:
                         for business in unique_batch:
                             qualification = qualify_lead(
-                                has_instagram=bool(business.instagram_url),
+                                has_actionable_contact=(
+                                    _qualification_contact_available(business)
+                                ),
                                 resolution=website_resolver.resolution_from_business(business),
                                 audit=website_resolver.audit_from_business(business),
                             )
@@ -776,8 +869,11 @@ async def run_search(
                         if b.is_lead:
                             b.task_id = task_id
                             leads.append(b)
-                        elif not b.instagram_url:
-                            skipped_no_instagram += 1
+                        elif not _qualification_contact_available(b):
+                            if config.LEAD_CONTACTABILITY_MODE == "instagram_only":
+                                skipped_no_instagram += 1
+                            else:
+                                skipped_no_contact += 1
                         elif b.website_status == "good website":
                             skipped_good_site += 1
                         elif (
@@ -861,6 +957,19 @@ async def run_search(
         # The bridge reads the final qualified rows back from SQLite. It never
         # parses the human CSV/XLSX export, and remote failure cannot fail search.
         opti_summary = await finalize_completed_task(task_id)
+        contactability_telemetry = _contactability_qualification_telemetry(
+            contactability_candidates,
+            leads,
+            task_id=task_id,
+        )
+        log.info(
+            "contactability_qualification %s",
+            json.dumps(
+                contactability_telemetry,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
 
         # --- Финальный отчёт ---
         added_no_site, added_bad_site = _added_counts()
@@ -883,7 +992,7 @@ async def run_search(
             f"Переглянуто бізнесів: {visited}\n"
             f"Відкрито карток Google Maps: {visited}/{policy.max_discovery_cards}\n"
             f"Перевірено унікальних кандидатів: {checked_candidates}/{policy.max_candidates}\n"
-            f"Пропущено без Instagram: {skipped_no_instagram}\n"
+            f"{_contactability_progress_lines()}"
             f"{first_party_recovery_line}"
             f"Пропущено з гарним сайтом: {skipped_good_site}\n"
             f"Пропущено через невизначений статус сайту: {skipped_uncertain_website}\n"
