@@ -130,6 +130,30 @@ MAX_INSTAGRAM_SEARCH_REQUESTS_PER_TASK = _environment_integer(
     1000,
 )
 
+INSTAGRAM_FIRST_PARTY_MODE = os.getenv(
+    "INSTAGRAM_FIRST_PARTY_MODE", "off"
+).strip().casefold()
+if INSTAGRAM_FIRST_PARTY_MODE not in {"off", "shadow"}:
+    raise ValueError("INSTAGRAM_FIRST_PARTY_MODE must be one of: off, shadow")
+MAX_INSTAGRAM_FIRST_PARTY_REQUESTS_PER_TASK = _environment_integer(
+    "MAX_INSTAGRAM_FIRST_PARTY_REQUESTS_PER_TASK", "0", 0, 1000
+)
+INSTAGRAM_FIRST_PARTY_MAX_PAGES_PER_BUSINESS = _environment_integer(
+    "INSTAGRAM_FIRST_PARTY_MAX_PAGES_PER_BUSINESS", "2", 1, 2
+)
+INSTAGRAM_FIRST_PARTY_TIMEOUT_SECONDS = _environment_float(
+    "INSTAGRAM_FIRST_PARTY_TIMEOUT_SECONDS", "8", 0.0, 30.0
+)
+INSTAGRAM_FIRST_PARTY_MAX_RESPONSE_BYTES = _environment_integer(
+    "INSTAGRAM_FIRST_PARTY_MAX_RESPONSE_BYTES", "1048576", 1, 16777216
+)
+INSTAGRAM_FIRST_PARTY_CONCURRENCY = _environment_integer(
+    "INSTAGRAM_FIRST_PARTY_CONCURRENCY", "4", 1, 32
+)
+INSTAGRAM_FIRST_PARTY_MAX_REDIRECTS = _environment_integer(
+    "INSTAGRAM_FIRST_PARTY_MAX_REDIRECTS", "3", 0, 3
+)
+
 # --- AI-скоринг ---
 # OpenAI scoring is opt-in so imports and paid requests stay off by default.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
