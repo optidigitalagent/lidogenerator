@@ -20,6 +20,20 @@ log = logging.getLogger("lead_hunter.control_api")
 PREFIX = "/internal/opti/v1"
 _CREATE_FIELDS = {"niche", "city", "targetLeads"}
 _TERMINAL = {"done", "error", "stopped"}
+_PROGRESS_COUNTERS = (
+    "visitedBusinesses",
+    "openedMapCards",
+    "checkedCandidates",
+    "qualifiedLeads",
+    "addedNoSite",
+    "addedBadSite",
+    "skippedGoodSite",
+    "skippedUncertainWebsite",
+    "skippedNoContact",
+    "skippedNoInstagram",
+    "recoveredInstagram",
+    "remainingQueries",
+)
 
 
 class ControlError(Exception):
@@ -91,17 +105,37 @@ def _safe_summary(raw: Any) -> dict[str, int | None]:
     return result
 
 
+def _safe_progress(task: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        parsed = json.loads(task.get("progress_json") or "{}")
+    except (TypeError, ValueError):
+        parsed = {}
+    if not isinstance(parsed, Mapping):
+        parsed = {}
+
+    stage = parsed.get("stage")
+    if not isinstance(stage, str) or not 1 <= len(stage) <= 100:
+        stage = str(task["status"])
+    result: dict[str, Any] = {
+        "stage": stage,
+        "targetLeads": int(task["count"]),
+    }
+    for field in _PROGRESS_COUNTERS:
+        value = parsed.get(field)
+        if type(value) is int and 0 <= value <= 1_000_000:
+            result[field] = value
+    stop_reason = parsed.get("stopReason")
+    if isinstance(stop_reason, str) and 1 <= len(stop_reason) <= 100:
+        result["stopReason"] = stop_reason
+    return result
+
+
 def search_dto(task: Mapping[str, Any]) -> dict[str, Any]:
     search_id = str(task["external_batch_id"])
     outbox = opti_outbox.get_by_batch(search_id)
     sync_status = str(outbox["status"]) if outbox else "NOT_ENQUEUED"
     summary = _safe_summary(outbox.get("responseSummaryJson") if outbox else None)
-    try:
-        progress = json.loads(task.get("progress_json") or "{}")
-    except (TypeError, ValueError):
-        progress = {}
-    if not isinstance(progress, dict):
-        progress = {}
+    progress = _safe_progress(task)
     error = None
     if task.get("last_error_code") or task.get("last_error_message"):
         error = {

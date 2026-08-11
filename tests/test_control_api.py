@@ -170,11 +170,13 @@ class SearchDtoTests(unittest.TestCase):
             "created_at": "now",
             "updated_at": "now",
             "finished_at": "now",
-            "progress_json": "{}",
+            "progress_json": '{"rawToken":"must-not-escape"}',
             "last_error_code": None,
             "last_error_message": None,
         }
         with patch.object(opti_outbox, "get_by_batch", return_value=None):
             dto = search_dto(task)
         self.assertEqual("NOT_ENQUEUED", dto["sync"]["status"])
+        self.assertEqual({"stage": "done", "targetLeads": 1}, dto["progress"])
         self.assertNotIn("control_idempotency_key", dto)
+        self.assertNotIn("rawToken", dto["progress"])
