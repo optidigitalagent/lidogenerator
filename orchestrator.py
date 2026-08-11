@@ -723,6 +723,42 @@ async def run_search(
         fallback_variants=niche_plan.fallback_variants,
     )
 
+    def _persist_progress(
+        stage: str,
+        *,
+        remaining_queries: int | None = None,
+        final_stop_reason: StopReason | None = None,
+    ) -> None:
+        added_no_site = sum(
+            1 for business in leads if business.website_status == "no website"
+        )
+        added_bad_site = sum(
+            1 for business in leads if business.website_status == "bad website"
+        )
+        snapshot = {
+            "stage": stage,
+            "targetLeads": target_leads,
+            "visitedBusinesses": visited,
+            "openedMapCards": visited,
+            "checkedCandidates": checked_candidates,
+            "qualifiedLeads": len(leads),
+            "addedNoSite": added_no_site,
+            "addedBadSite": added_bad_site,
+            "skippedGoodSite": skipped_good_site,
+            "skippedUncertainWebsite": skipped_uncertain_website,
+            "skippedNoContact": skipped_no_contact,
+            "skippedNoInstagram": skipped_no_instagram,
+            "recoveredInstagram": first_party_instagrams_recovered,
+            "remainingQueries": (
+                query_queue.remaining_queries
+                if remaining_queries is None
+                else remaining_queries
+            ),
+        }
+        if final_stop_reason is not None:
+            snapshot["stopReason"] = final_stop_reason.value
+        db.update_task_progress(task_id, snapshot)
+
     def _decide(remaining_queries: int):
         return decide_next(
             SearchProgress(
@@ -780,6 +816,7 @@ async def run_search(
             if config.INSTAGRAM_FIRST_PARTY_MODE == "apply"
             else ""
         )
+        _persist_progress("checking")
         await _update_website_search_budget_progress()
         await progress.update(
             "main",
@@ -800,6 +837,7 @@ async def run_search(
 
     try:
         db.update_task_status(task_id, "collecting")
+        _persist_progress("collecting")
         decision = _decide(remaining_queries=query_queue.remaining_queries)
         if decision.stop_reason is StopReason.USER_STOPPED:
             raise SearchStopped()
@@ -811,6 +849,7 @@ async def run_search(
 
         # --- Сбор батчами + фильтрация до набора target_leads ---
         db.update_task_status(task_id, "checking")
+        _persist_progress("checking")
 
         while not query_queue.exhausted:
             decision = _decide(remaining_queries=query_queue.remaining_queries)
@@ -985,6 +1024,7 @@ async def run_search(
 
         # --- Обогащение лидов (Instagram + AI-скоринг) — не влияет на отбор ---
         db.update_task_status(task_id, "scoring")
+        _persist_progress("scoring", final_stop_reason=stop_reason)
         db.save_businesses(leads)  # сохраняем лиды, получаем id
 
         if leads:
@@ -1007,6 +1047,7 @@ async def run_search(
         csv_path = reporter.export_csv(leads, task_id=task_id)
         xlsx_path = reporter.export_excel(leads, task_id=task_id)
         out_path = xlsx_path or csv_path
+        _persist_progress("done", final_stop_reason=stop_reason)
         db.update_task_status(task_id, "done", csv_path=out_path)
         # The bridge reads the final qualified rows back from SQLite. It never
         # parses the human CSV/XLSX export, and remote failure cannot fail search.
@@ -1069,6 +1110,7 @@ async def run_search(
             db.save_businesses(leads)
             for b in leads:
                 db.update_business(b)
+        _persist_progress("stopped", final_stop_reason=StopReason.USER_STOPPED)
         db.update_task_status(task_id, "stopped")
         if progress_callback:
             await progress_callback(
@@ -1077,7 +1119,13 @@ async def run_search(
             )
         return None
     except Exception as e:
-        db.update_task_status(task_id, "error")
+        _persist_progress("error")
+        db.update_task_status(
+            task_id,
+            "error",
+            error_code=type(e).__name__.upper()[:100],
+            error_message=str(e),
+        )
         if progress_callback:
             await progress_callback(f"❌ Помилка: {type(e).__name__}: {e}")
         raise

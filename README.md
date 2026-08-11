@@ -101,3 +101,31 @@ The canonical example is
 configure a disposable `DB_PATH`, run `python scripts/enqueue_opti_smoke.py`,
 then start the bot worker or use `/sync`. The helper only enqueues a fixed
 three-lead batch and performs no network call by itself.
+
+## Opti Control API v0
+
+Telegram remains fully supported. When explicitly enabled, the bot process also
+serves a small authenticated HTTP API used by the Opti web workspace. Telegram
+and Opti searches share one in-process `SearchRuntime`, stop-event registry, and
+`MAX_CONCURRENT_SEARCHES` semaphore. Interrupted nonterminal searches are marked
+`error` with `PROCESS_RESTARTED` at startup; they are not falsely resumed.
+
+Configuration:
+
+```text
+LEAD_GENERATOR_CONTROL_ENABLED=false
+LEAD_GENERATOR_CONTROL_TOKEN=
+HOST=0.0.0.0
+PORT=8080
+```
+
+When enabled, the token must contain at least 32 characters or startup fails
+closed. `/health` is public and minimal. All routes under `/internal/opti/v1`
+require a bearer token compared in constant time. See
+`contracts/opti-control-api-v0.md` for the route and DTO contract.
+
+The browser never receives this control token: it talks only to Opti's
+authenticated same-origin API, and Opti calls this API server-to-server. Search
+tasks, structured progress, terminal state, idempotency, and the outbox remain in
+Lead Generator SQLite only. Opti does not mirror them. Completed leads still
+reach Opti exclusively through the existing Bridge and immutable outbox.

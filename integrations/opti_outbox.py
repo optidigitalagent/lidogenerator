@@ -146,6 +146,24 @@ def retry_failed(*, now: datetime | None = None) -> int:
         return cursor.rowcount
 
 
+def retry_failed_batch(
+    external_batch_id: str, *, now: datetime | None = None
+) -> bool:
+    """Reset exactly one failed batch without changing global /sync behavior."""
+    timestamp = _timestamp(now)
+    with db._connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE opti_sync_outbox
+            SET status = 'RETRY', attempts = 0, nextAttemptAt = ?, updatedAt = ?,
+                lastErrorCode = NULL, lastErrorMessage = NULL
+            WHERE externalBatchId = ? AND status = 'FAILED'
+            """,
+            (timestamp, timestamp, external_batch_id),
+        )
+        return cursor.rowcount == 1
+
+
 def _claim_due(
     *,
     now: datetime | None = None,
