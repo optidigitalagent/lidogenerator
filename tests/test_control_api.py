@@ -24,11 +24,22 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.db_patch.start()
         db.init_db()
-        self.runtime = SearchRuntime(2)
+        self.runtime = SearchRuntime(1)
+        self.runner_started_ids: list[int] = []
+        self.runner_started = asyncio.Event()
 
         async def waiting_runner(task_id, *, progress_callback, stop_event):
+            self.runner_started_ids.append(task_id)
+            self.runner_started.set()
             await stop_event.wait()
-            db.update_task_progress(task_id, {"stage": "stopped", "targetLeads": 1})
+            db.update_task_progress(
+                task_id,
+                {
+                    "stage": "stopped",
+                    "targetLeads": 1,
+                    "stopReason": "USER_STOPPED",
+                },
+            )
             db.update_task_status(task_id, "stopped")
 
         self.runner_patch = patch(
@@ -121,6 +132,48 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             "/internal/opti/v1/searches/missing", headers=self.auth()
         )
         self.assertEqual(404, response.status)
+
+    async def test_queued_stop_response_and_get_are_immediately_stopped(self):
+        first = await self.client.post(
+            "/internal/opti/v1/searches",
+            headers={**self.auth(), "Idempotency-Key": "queue-first"},
+            json={"niche": "one", "city": "Kyiv", "targetLeads": 1},
+        )
+        self.assertEqual(201, first.status)
+        first_id = (await first.json())["searchId"]
+        first_task_id = db.get_task_by_search_id(first_id)["id"]
+        await self.runner_started.wait()
+
+        second = await self.client.post(
+            "/internal/opti/v1/searches",
+            headers={**self.auth(), "Idempotency-Key": "queue-second"},
+            json={"niche": "two", "city": "Kyiv", "targetLeads": 1},
+        )
+        self.assertEqual(201, second.status)
+        second_id = (await second.json())["searchId"]
+        await asyncio.sleep(0)
+        self.assertEqual([first_task_id], self.runner_started_ids)
+
+        stopped = await self.client.post(
+            f"/internal/opti/v1/searches/{second_id}/stop", headers=self.auth()
+        )
+        self.assertEqual(200, stopped.status)
+        stopped_dto = await stopped.json()
+        self.assertEqual("stopped", stopped_dto["status"])
+        self.assertEqual("stopped", stopped_dto["progress"]["stage"])
+        self.assertEqual("USER_STOPPED", stopped_dto["progress"]["stopReason"])
+        self.assertFalse(stopped_dto["availableActions"]["canStop"])
+
+        found = await self.client.get(
+            f"/internal/opti/v1/searches/{second_id}", headers=self.auth()
+        )
+        self.assertEqual(200, found.status)
+        found_dto = await found.json()
+        self.assertEqual("stopped", found_dto["status"])
+        self.assertEqual("stopped", found_dto["progress"]["stage"])
+        self.assertEqual("USER_STOPPED", found_dto["progress"]["stopReason"])
+        self.assertFalse(found_dto["availableActions"]["canStop"])
+        self.assertEqual([first_task_id], self.runner_started_ids)
 
     async def test_failed_retry_changes_only_requested_batch_and_sent_is_idempotent(
         self,

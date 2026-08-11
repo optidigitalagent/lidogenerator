@@ -21,15 +21,19 @@ class SearchRuntime:
         self._semaphore = asyncio.Semaphore(max_concurrent_searches)
         self._tasks: dict[int, asyncio.Task[None]] = {}
         self._stop_events: dict[int, asyncio.Event] = {}
+        self._running: set[int] = set()
+        self._queued_stopped: set[int] = set()
         self._closing = False
 
     @property
     def active_count(self) -> int:
-        return sum(not task.done() for task in self._tasks.values())
+        return sum(self.is_active(task_id) for task_id in self._tasks)
 
     def is_active(self, task_id: int) -> bool:
         task = self._tasks.get(task_id)
-        return task is not None and not task.done()
+        return (
+            task is not None and not task.done() and task_id not in self._queued_stopped
+        )
 
     def launch(
         self,
@@ -39,7 +43,7 @@ class SearchRuntime:
         completion_callback: CompletionCallback | None = None,
         run_search: Callable[..., Awaitable[str | None]] | None = None,
     ) -> bool:
-        if self._closing or self.is_active(task_id):
+        if self._closing or task_id in self._tasks:
             return False
         stop_event = asyncio.Event()
         runner = run_search or orchestrator.run_search
@@ -48,6 +52,7 @@ class SearchRuntime:
             result: str | None = None
             try:
                 async with self._semaphore:
+                    self._running.add(task_id)
                     if stop_event.is_set():
                         db.update_task_progress(
                             task_id, {"stage": "stopped", "stopReason": "USER_STOPPED"}
@@ -71,6 +76,8 @@ class SearchRuntime:
                         await completion_callback(result)
                     except Exception:
                         log.exception("Search completion callback %s failed", task_id)
+                self._running.discard(task_id)
+                self._queued_stopped.discard(task_id)
                 self._tasks.pop(task_id, None)
                 self._stop_events.pop(task_id, None)
 
@@ -83,6 +90,12 @@ class SearchRuntime:
         if event is None:
             return False
         event.set()
+        if task_id not in self._running:
+            db.update_task_progress(
+                task_id, {"stage": "stopped", "stopReason": "USER_STOPPED"}
+            )
+            db.update_task_status(task_id, "stopped")
+            self._queued_stopped.add(task_id)
         return True
 
     async def shutdown(self) -> None:
@@ -94,3 +107,5 @@ class SearchRuntime:
             await asyncio.gather(*pending, return_exceptions=True)
         self._tasks.clear()
         self._stop_events.clear()
+        self._running.clear()
+        self._queued_stopped.clear()
