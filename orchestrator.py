@@ -756,7 +756,11 @@ async def run_search(
             ),
         }
         if final_stop_reason is not None:
-            snapshot["stopReason"] = final_stop_reason.value
+            snapshot["stopReason"] = (
+                final_stop_reason.name
+                if final_stop_reason is StopReason.USER_STOPPED
+                else final_stop_reason.value
+            )
         db.update_task_progress(task_id, snapshot)
 
     def _decide(remaining_queries: int):
@@ -834,6 +838,23 @@ async def run_search(
             f"Додано з поганим сайтом: {added_bad_site}",
             force=force,
         )
+
+    async def _finalize_user_stop() -> None:
+        nonlocal leads
+
+        # The user stopped the search, so preserve any qualified partial results.
+        leads = limit_to_target(leads, policy.target_leads)
+        if leads:
+            db.save_businesses(leads)
+            for business in leads:
+                db.update_business(business)
+        _persist_progress("stopped", final_stop_reason=StopReason.USER_STOPPED)
+        db.update_task_status(task_id, "stopped")
+        if progress_callback:
+            await progress_callback(
+                f"⏹ Пошук зупинено. Встигли зібрати {len(leads)} лідів "
+                f"(переглянуто {visited} бізнесів)."
+            )
 
     try:
         db.update_task_status(task_id, "collecting")
@@ -1104,21 +1125,17 @@ async def run_search(
         return out_path
 
     except SearchStopped:
-        # Пользователь остановил поиск — сохраняем то, что успели набрать
-        leads = limit_to_target(leads, policy.target_leads)
-        if leads:
-            db.save_businesses(leads)
-            for b in leads:
-                db.update_business(b)
-        _persist_progress("stopped", final_stop_reason=StopReason.USER_STOPPED)
-        db.update_task_status(task_id, "stopped")
-        if progress_callback:
-            await progress_callback(
-                f"⏹ Пошук зупинено. Встигли зібрати {len(leads)} лідів "
-                f"(переглянуто {visited} бізнесів)."
-            )
+        await _finalize_user_stop()
         return None
     except Exception as e:
+        if stop_event is not None and stop_event.is_set():
+            log.warning(
+                "search_stop_precedence task_id=%s exception_type=%s",
+                task_id,
+                type(e).__name__,
+            )
+            await _finalize_user_stop()
+            return None
         _persist_progress("error")
         db.update_task_status(
             task_id,
