@@ -12,7 +12,6 @@
 Тексты бота — на украинском. Запуск: python bot.py
 """
 
-import asyncio
 import logging
 from pathlib import Path
 
@@ -32,9 +31,10 @@ from telegram.ext import (
 )
 
 import config
+import control_api
 import db
-import orchestrator
 from integrations import opti_bridge, opti_outbox
+from search_runtime import SearchRuntime
 
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s: %(message)s", level=logging.INFO
@@ -59,13 +59,14 @@ NICHES = [
 
 COUNTS = [50, 100, 200]
 
-# Активные поиски: user_id -> {"task_id", "stop_event", "asyncio_task"}
+# Active Telegram UX mapping only; runtime ownership is keyed by task_id below.
 # Ключ — именно user_id, чтобы разные пользователи (в т.ч. в одной группе)
 # могли искать параллельно и не мешали друг другу.
-ACTIVE: dict = {}
+ACTIVE: dict[int, int] = {}
 
 # Ограничение одновременно выполняющихся поисков (общее на весь бот).
-SEARCH_SLOTS = asyncio.Semaphore(config.MAX_CONCURRENT_SEARCHES)
+SEARCH_RUNTIME = SearchRuntime(config.MAX_CONCURRENT_SEARCHES)
+CONTROL_SERVER = control_api.ControlServer(SEARCH_RUNTIME)
 OUTBOX_WORKER = opti_outbox.OutboxWorker()
 
 
@@ -120,7 +121,7 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await deny(update)
         return ConversationHandler.END
     user_id = update.effective_user.id
-    if user_id in ACTIVE and not ACTIVE[user_id]["asyncio_task"].done():
+    if user_id in ACTIVE and SEARCH_RUNTIME.is_active(ACTIVE[user_id]):
         await update.message.reply_text(
             "⏳ Пошук уже виконується. Зупини його командою /stop або дочекайся завершення."
         )
@@ -198,8 +199,9 @@ async def on_go(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     city = context.user_data["city"]
     count = context.user_data["count"]
 
-    task_id = db.create_task(niche, city, count, chat_id=chat_id)
-    stop_event = asyncio.Event()
+    task_id = db.create_task(
+        niche, city, count, chat_id=chat_id, initiated_via="TELEGRAM"
+    )
 
     async def send_progress(text: str):
         try:
@@ -207,30 +209,33 @@ async def on_go(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         except Exception:
             log.exception("Не удалось отправить прогресс в чат %s", chat_id)
 
-    async def run():
+    async def completed(csv_path: str | None):
         try:
-            async with SEARCH_SLOTS:
-                if stop_event.is_set():
-                    return
-                csv_path = await orchestrator.run_search(
-                    task_id, progress_callback=send_progress, stop_event=stop_event
-                )
             if csv_path:
                 with open(csv_path, "rb") as f:
                     await context.bot.send_document(
                         chat_id, f, filename=Path(csv_path).name,
                         caption="📊 Таблиця лідів готова!",
                     )
-        except Exception:
-            log.exception("Поиск %s завершился ошибкой", task_id)
         finally:
-            ACTIVE.pop(user_id, None)
+            if ACTIVE.get(user_id) == task_id:
+                ACTIVE.pop(user_id, None)
 
-    ACTIVE[user_id] = {
-        "task_id": task_id,
-        "stop_event": stop_event,
-        "asyncio_task": asyncio.create_task(run()),
-    }
+    ACTIVE[user_id] = task_id
+    if not SEARCH_RUNTIME.launch(
+        task_id,
+        progress_callback=send_progress,
+        completion_callback=completed,
+    ):
+        ACTIVE.pop(user_id, None)
+        db.update_task_status(
+            task_id,
+            "error",
+            error_code="SEARCH_STATE_CONFLICT",
+            error_message="Search could not be launched",
+        )
+        await query.edit_message_text("Search could not be launched. Please try again.")
+        return ConversationHandler.END
 
     await query.edit_message_text(
         f"🚀 Запущено! Шукаю {count} якісних лідів: «{niche}» у місті {city}.\n"
@@ -299,11 +304,11 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         await deny(update)
         return
-    active = ACTIVE.get(update.effective_user.id)
-    if not active or active["asyncio_task"].done():
+    task_id = ACTIVE.get(update.effective_user.id)
+    if task_id is None or not SEARCH_RUNTIME.is_active(task_id):
         await update.message.reply_text("Зараз нічого не виконується.")
         return
-    active["stop_event"].set()
+    SEARCH_RUNTIME.stop(task_id)
     await update.message.reply_text("⏹ Зупиняю пошук... Збережу те, що вже зібрано.")
 
 
@@ -341,6 +346,20 @@ async def _stop_outbox_worker(application: Application) -> None:
     await OUTBOX_WORKER.stop()
 
 
+async def _start_services(application: Application) -> None:
+    interrupted = db.recover_interrupted_tasks()
+    if interrupted:
+        log.warning("Marked %s interrupted searches as error", interrupted)
+    await _start_outbox_worker(application)
+    await CONTROL_SERVER.start()
+
+
+async def _stop_services(application: Application) -> None:
+    await CONTROL_SERVER.stop()
+    await SEARCH_RUNTIME.shutdown()
+    await _stop_outbox_worker(application)
+
+
 # ---------- Запуск ----------
 
 def main():
@@ -361,8 +380,8 @@ def main():
     app = (
         Application.builder()
         .token(config.TELEGRAM_TOKEN)
-        .post_init(_start_outbox_worker)
-        .post_shutdown(_stop_outbox_worker)
+        .post_init(_start_services)
+        .post_shutdown(_stop_services)
         .build()
     )
 

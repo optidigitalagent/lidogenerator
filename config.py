@@ -304,3 +304,17 @@ OPTI_SYNC_MAX_ATTEMPTS = _environment_integer(
 OPTI_SYNC_RETRY_BASE_SECONDS = _environment_integer(
     "OPTI_SYNC_RETRY_BASE_SECONDS", "30", 1, 3600
 )
+
+# --- Opti Control API v0 ---
+LEAD_GENERATOR_CONTROL_ENABLED = (
+    _environment_boolean("LEAD_GENERATOR_CONTROL_ENABLED", "false") == "true"
+)
+LEAD_GENERATOR_CONTROL_TOKEN = os.getenv(
+    "LEAD_GENERATOR_CONTROL_TOKEN", ""
+).strip()
+if LEAD_GENERATOR_CONTROL_ENABLED and len(LEAD_GENERATOR_CONTROL_TOKEN) < 32:
+    raise ValueError(
+        "LEAD_GENERATOR_CONTROL_TOKEN must contain at least 32 characters when control is enabled"
+    )
+HOST = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"
+PORT = _environment_integer("PORT", "8080", 1, 65535)
