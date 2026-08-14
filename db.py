@@ -98,7 +98,12 @@ def init_db() -> None:
                 website_audit_evidence TEXT DEFAULT '',
                 website_audit_error TEXT DEFAULT '',
                 lead_decision TEXT DEFAULT '',
-                lead_decision_reason TEXT DEFAULT ''
+                lead_decision_reason TEXT DEFAULT '',
+                website_presence_status TEXT DEFAULT '',
+                website_presence_source TEXT DEFAULT '',
+                website_presence_resolved_url TEXT DEFAULT '',
+                website_presence_evidence TEXT DEFAULT '',
+                website_presence_error TEXT DEFAULT ''
             );
 
             -- Дубликаты по телефону внутри одной задачи не сохраняем
@@ -144,6 +149,10 @@ def init_db() -> None:
         )
         _migrate_tasks(conn)
         _migrate_businesses(conn)
+        from candidate_history import backfill_persisted_leads, initialize_history_schema
+
+        initialize_history_schema(conn)
+        backfill_persisted_leads(conn)
 
 
 _BUSINESS_MIGRATIONS = {
@@ -168,6 +177,11 @@ _BUSINESS_MIGRATIONS = {
     "website_audit_error": "TEXT DEFAULT ''",
     "lead_decision": "TEXT DEFAULT ''",
     "lead_decision_reason": "TEXT DEFAULT ''",
+    "website_presence_status": "TEXT DEFAULT ''",
+    "website_presence_source": "TEXT DEFAULT ''",
+    "website_presence_resolved_url": "TEXT DEFAULT ''",
+    "website_presence_evidence": "TEXT DEFAULT ''",
+    "website_presence_error": "TEXT DEFAULT ''",
 }
 
 
@@ -433,6 +447,9 @@ _BUSINESS_COLUMNS = (
     "website_resolution_error", "website_audit_status",
     "website_audit_http_status", "website_audit_evidence", "website_audit_error",
     "lead_decision", "lead_decision_reason",
+    "website_presence_status", "website_presence_source",
+    "website_presence_resolved_url", "website_presence_evidence",
+    "website_presence_error",
 )
 
 
@@ -471,7 +488,9 @@ def update_business(b: Business) -> None:
             "website_resolution_source=?, website_resolution_confidence=?, "
             "website_resolution_evidence=?, website_resolution_error=?, website_audit_status=?, "
             "website_audit_http_status=?, website_audit_evidence=?, website_audit_error=?, "
-            "lead_decision=?, lead_decision_reason=? WHERE id=?",
+            "lead_decision=?, lead_decision_reason=?, website_presence_status=?, "
+            "website_presence_source=?, website_presence_resolved_url=?, "
+            "website_presence_evidence=?, website_presence_error=? WHERE id=?",
             (
                 b.website, int(b.has_site), b.site_quality, int(b.instagram_active),
                 b.followers, b.posts_count, b.last_post_days,
@@ -482,7 +501,10 @@ def update_business(b: Business) -> None:
                 b.website_resolution_confidence, b.website_resolution_evidence,
                 b.website_resolution_error, b.website_audit_status,
                 b.website_audit_http_status, b.website_audit_evidence,
-                b.website_audit_error, b.lead_decision, b.lead_decision_reason, b.id,
+                b.website_audit_error, b.lead_decision, b.lead_decision_reason,
+                b.website_presence_status, b.website_presence_source,
+                b.website_presence_resolved_url, b.website_presence_evidence,
+                b.website_presence_error, b.id,
             ),
         )
 

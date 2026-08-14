@@ -201,6 +201,7 @@ class SearchRequest:
     phone: str | None = None
     max_results: int = 5
     timeout_seconds: float = 10.0
+    instagram_url: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -224,6 +225,10 @@ class SearchRequest:
         if not 0.0 < timeout <= 30.0:
             raise ValueError("timeout_seconds must be greater than 0 and at most 30")
         object.__setattr__(self, "timeout_seconds", timeout)
+        if self.instagram_url is not None:
+            normalized_instagram = normalize_candidate_url(self.instagram_url)
+            normalize_instagram_username(normalized_instagram)
+            object.__setattr__(self, "instagram_url", normalized_instagram)
 
 
 @dataclass(frozen=True)

@@ -20,6 +20,26 @@ from typing import List
 import config
 from contactability import normalized_instagram_profile
 from models import Business
+from website_presence import classify_website_presence_url
+
+
+def _reportable_leads(businesses: List[Business]) -> List[Business]:
+    leads = [business for business in businesses if business.is_lead]
+    if config.LEAD_WEBSITE_POLICY == "verified_no_site_only":
+        leads = [
+            business
+            for business in leads
+            if business.website_presence_status == "absent_confirmed"
+            and not business.website_presence_resolved_url
+            and not classify_website_presence_url(business.website)
+        ]
+    return leads
+
+
+def _reported_website_url(business: Business) -> str:
+    if config.LEAD_WEBSITE_POLICY == "verified_no_site_only":
+        return ""
+    return business.effective_website_url
 
 # Колонки CSV: (заголовок, как достать значение из Business)
 COLUMNS = [
@@ -40,7 +60,7 @@ COLUMNS = [
         "Contact Channels",
         lambda b: ",".join(channel.value for channel in b.contactability.channels),
     ),
-    ("Website URL", lambda b: b.effective_website_url),
+    ("Website URL", _reported_website_url),
     ("Website Status", lambda b: b.website_status),
     ("Resolution Status", lambda b: b.website_resolution_status),
     ("Resolution Source", lambda b: b.website_resolution_source),
@@ -59,7 +79,7 @@ def export_csv(businesses: List[Business], task_id: int = 0) -> str:
     path = config.EXPORT_DIR / f"leads_task{task_id}_{stamp}.csv"
 
     # Страховка: даже если на вход пришли все бизнесы — пишем только лидов.
-    leads = [b for b in businesses if b.is_lead]
+    leads = _reportable_leads(businesses)
     # Сначала "no website" (главный приоритет), потом "bad website".
     leads.sort(key=lambda b: 0 if b.website_status == "no website" else 1)
 
@@ -110,7 +130,7 @@ def export_excel(businesses: List[Business], task_id: int = 0) -> str:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = config.EXPORT_DIR / f"leads_task{task_id}_{stamp}.xlsx"
 
-    leads = [b for b in businesses if b.is_lead]
+    leads = _reportable_leads(businesses)
     leads.sort(key=lambda b: 0 if b.website_status == "no website" else 1)
 
     wb = Workbook()
@@ -142,7 +162,7 @@ def export_excel(businesses: List[Business], task_id: int = 0) -> str:
 def format_leads_summary(businesses: List[Business], limit: int = 20) -> str:
     """Format qualified leads with at least one usable contact per entry."""
 
-    leads = [business for business in businesses if business.is_lead]
+    leads = _reportable_leads(businesses)
     leads.sort(key=lambda business: 0 if business.website_status == "no website" else 1)
     if not leads:
         ending = (
@@ -172,6 +192,7 @@ def format_leads_summary(businesses: List[Business], limit: int = 20) -> str:
         website_line = (
             f"\nWebsite: {business.effective_website_url}"
             if business.effective_website_url
+            and config.LEAD_WEBSITE_POLICY != "verified_no_site_only"
             else ""
         )
         blocks.append(

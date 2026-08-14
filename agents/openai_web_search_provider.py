@@ -223,6 +223,11 @@ def build_openai_web_search_input(request: SearchRequest) -> str:
     city = _bounded_value(request.city, 80)
     address = _bounded_value(request.address, 120) if request.address is not None else None
     phone = _bounded_value(request.phone, 32) if request.phone is not None else None
+    instagram = (
+        _bounded_value(request.instagram_url, 80)
+        if request.instagram_url is not None
+        else None
+    )
     identity_lines = [
         f"Business name: {name}",
         f"City: {city}",
@@ -231,6 +236,8 @@ def build_openai_web_search_input(request: SearchRequest) -> str:
         identity_lines.append(f"Address: {address}")
     if phone is not None:
         identity_lines.append(f"Phone: {phone}")
+    if instagram is not None:
+        identity_lines.append(f"Instagram profile: {instagram}")
     identity_lines.append(f"Maximum candidates: {request.max_results}")
     query_variants = tuple(
         f"{index}. {variant}"

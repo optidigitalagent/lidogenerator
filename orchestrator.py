@@ -21,6 +21,7 @@ import time
 import urllib.parse
 from typing import Awaitable, Callable, List, Optional
 
+import candidate_history
 import city_catalog
 import config
 import db
@@ -33,8 +34,10 @@ from agents import (
     reporter,
     site_checker,
     social_checker,
+    website_presence_verifier,
     website_resolver,
 )
+from candidate_history import CandidateClaimResult
 from agents.instagram_first_party_resolver import FirstPartyInstagramResolver
 from instagram_first_party_resolution import (
     FirstPartyInstagramEvidenceSource,
@@ -54,6 +57,7 @@ from website_search_runtime import (
     openai_web_search_telemetry_snapshot,
     search_budget_snapshot,
 )
+from website_presence import WebsitePresenceStatus
 from niche_catalog import resolve_niche_plan
 from query_budget import allocate_query_budget
 from query_planner import build_query_queue
@@ -639,6 +643,7 @@ async def run_search(
     website_search_provider: SearchProvider | None = None,
     first_party_resolver_runtime: FirstPartyInstagramResolver | None = None,
     rendered_audit_runtime: RenderedSiteAuditRuntime | None = None,
+    website_presence_search_provider: SearchProvider | None = None,
 ) -> Optional[str]:
     """Полный цикл поиска для задачи task_id.
 
@@ -663,12 +668,21 @@ async def run_search(
     interval = progress_interval if progress_interval is not None else config.PROGRESS_INTERVAL
     progress = _Progress(progress_callback, interval, stop_event)
     resolver_mode = parse_resolver_mode(config.WEBSITE_RESOLVER_MODE)
+    verified_no_site = config.LEAD_WEBSITE_POLICY == "verified_no_site_only"
     if website_search_provider is not None:
         runtime_website_search_provider = website_search_provider
     elif resolver_mode is ResolverMode.OFF:
         runtime_website_search_provider = None
     else:
         runtime_website_search_provider = build_configured_search_provider()
+    if config.WEBSITE_PRESENCE_VERIFICATION_MODE != "apply":
+        runtime_presence_search_provider = None
+    elif website_presence_search_provider is not None:
+        runtime_presence_search_provider = website_presence_search_provider
+    else:
+        runtime_presence_search_provider = build_configured_search_provider(
+            max_requests=config.MAX_WEBSITE_PRESENCE_SEARCH_REQUESTS_PER_TASK
+        )
     if config.INSTAGRAM_FIRST_PARTY_MODE in {"shadow", "apply"}:
         runtime_first_party_resolver = (
             first_party_resolver_runtime
@@ -695,6 +709,17 @@ async def run_search(
     skipped_no_instagram = 0            # пропущено: нет Instagram
     skipped_good_site = 0               # пропущено: есть Instagram, но хороший сайт
     skipped_uncertain_website = 0       # пропущено: результат сайта недостаточно надёжен
+    skipped_previously_checked = 0
+    skipped_claimed_elsewhere = 0
+    skipped_website_present = 0
+    maps_presence_vetoes = 0
+    search_presence_vetoes = 0
+    hosted_site_vetoes = 0
+    website_absent_confirmed = 0
+    website_presence_uncertain = 0
+    website_presence_technical_errors = 0
+    website_presence_requests_used = 0
+    retryable_claim_releases = 0
     stop_reason: Optional[StopReason] = None
     seen_business_keys: set[tuple[str, ...]] = set()
     niche_plan = resolve_niche_plan(niche)
@@ -707,6 +732,40 @@ async def run_search(
         if city_definition is not None
         else city
     )
+    history_scope = candidate_history.canonical_scope_key_from_resolved(
+        niche_plan, city_definition, city
+    )
+    claimed_history_keys: dict[int, str] = {}
+
+    def _history_claim(business: Business) -> CandidateClaimResult:
+        if config.CANDIDATE_HISTORY_MODE != "apply":
+            return CandidateClaimResult.CLAIMED
+        basis, key = candidate_history.candidate_fingerprint(business, query_city)
+        result = candidate_history.claim_candidate(
+            history_scope, key, basis, task_id
+        )
+        if result is CandidateClaimResult.CLAIMED:
+            claimed_history_keys[id(business)] = key
+        return result
+
+    def _history_checked(business: Business, outcome: str) -> None:
+        if config.CANDIDATE_HISTORY_MODE != "apply":
+            return
+        key = claimed_history_keys.pop(id(business), None)
+        if key is not None:
+            candidate_history.mark_candidate_checked(
+                history_scope, key, task_id, outcome
+            )
+
+    def _history_release(business: Business) -> None:
+        nonlocal retryable_claim_releases
+        if config.CANDIDATE_HISTORY_MODE != "apply":
+            return
+        key = claimed_history_keys.pop(id(business), None)
+        if key is not None and candidate_history.release_candidate_claim(
+            history_scope, key, task_id
+        ):
+            retryable_claim_releases += 1
     district_fragments = (
         tuple(
             district.query_text
@@ -748,6 +807,17 @@ async def run_search(
             "skippedUncertainWebsite": skipped_uncertain_website,
             "skippedNoContact": skipped_no_contact,
             "skippedNoInstagram": skipped_no_instagram,
+            "skippedPreviouslyChecked": skipped_previously_checked,
+            "skippedClaimedElsewhere": skipped_claimed_elsewhere,
+            "skippedWebsitePresent": skipped_website_present,
+            "mapsPresenceVetoes": maps_presence_vetoes,
+            "searchPresenceVetoes": search_presence_vetoes,
+            "hostedSiteVetoes": hosted_site_vetoes,
+            "websiteAbsentConfirmed": website_absent_confirmed,
+            "websitePresenceUncertain": website_presence_uncertain,
+            "websitePresenceTechnicalErrors": website_presence_technical_errors,
+            "websitePresenceRequestsUsed": website_presence_requests_used,
+            "websitePresenceRequestsMax": config.MAX_WEBSITE_PRESENCE_SEARCH_REQUESTS_PER_TASK,
             "recoveredInstagram": first_party_instagrams_recovered,
             "remainingQueries": (
                 query_queue.remaining_queries
@@ -806,11 +876,20 @@ async def run_search(
         )
 
     async def _update_website_search_budget_progress() -> None:
-        snapshot = search_budget_snapshot(runtime_website_search_provider)
+        provider = (
+            runtime_presence_search_provider
+            if verified_no_site
+            else runtime_website_search_provider
+        )
+        snapshot = search_budget_snapshot(provider)
         if snapshot is not None:
             await progress.update(
                 "website_search",
-                f"Пошуків офіційного сайту: {snapshot.used_requests}/{snapshot.max_requests}",
+                (
+                    f"Перевірок наявності сайту: {snapshot.used_requests}/{snapshot.max_requests}"
+                    if verified_no_site
+                    else f"Пошуків офіційного сайту: {snapshot.used_requests}/{snapshot.max_requests}"
+                ),
             )
 
     async def _send_progress(force: bool = False):
@@ -822,6 +901,24 @@ async def run_search(
         )
         _persist_progress("checking")
         await _update_website_search_budget_progress()
+        if verified_no_site:
+            await progress.update(
+                "main",
+                f"🔎 Шукаю {target_leads} перевірених no-site лідів: «{niche}» у місті {city}\n"
+                f"Відкрито карток Google Maps: {visited}/{policy.max_discovery_cards}\n"
+                f"Перевірено нових кандидатів: {checked_candidates}/{policy.max_candidates}\n"
+                f"Знайдено валідних лідів: {len(leads)}/{target_leads}\n"
+                f"Пропущено вже перевірених: {skipped_previously_checked}\n"
+                f"Пропущено — перевіряються іншим завданням: {skipped_claimed_elsewhere}\n"
+                f"Пропущено без Instagram: {skipped_no_instagram}\n"
+                f"Пропущено — сайт знайдено: {skipped_website_present}\n"
+                f"Пропущено — сайт не вдалося надійно перевірити: {skipped_uncertain_website}\n"
+                f"Підтверджено без сайту: {website_absent_confirmed}\n"
+                f"Перевірок наявності сайту: {website_presence_requests_used}/"
+                f"{config.MAX_WEBSITE_PRESENCE_SEARCH_REQUESTS_PER_TASK}",
+                force=force,
+            )
+            return
         await progress.update(
             "main",
             f"🔎 Шукаю {target_leads} якісних лідів: «{niche}» у місті {city}\n"
@@ -843,6 +940,9 @@ async def run_search(
         nonlocal leads
 
         # The user stopped the search, so preserve any qualified partial results.
+        if config.CANDIDATE_HISTORY_MODE == "apply":
+            candidate_history.release_unfinished_candidate_claims(task_id)
+            claimed_history_keys.clear()
         leads = limit_to_target(leads, policy.target_leads)
         if leads:
             db.save_businesses(leads)
@@ -939,6 +1039,89 @@ async def run_search(
                     unique_batch.append(business)
 
                 if unique_batch:
+                    claimed_batch: List[Business] = []
+                    for business in unique_batch:
+                        claim = _history_claim(business)
+                        if claim is CandidateClaimResult.ALREADY_CHECKED:
+                            skipped_previously_checked += 1
+                            continue
+                        if claim is CandidateClaimResult.CLAIMED_BY_OTHER_TASK:
+                            skipped_claimed_elsewhere += 1
+                            continue
+                        claimed_batch.append(business)
+                    unique_batch = claimed_batch
+
+                if unique_batch and verified_no_site:
+                    for business in unique_batch:
+                        if stop_event is not None and stop_event.is_set():
+                            raise SearchStopped()
+                        contactability_candidates.append(business)
+                        if not business.contactability.instagram_available:
+                            business.lead_decision = LeadDecision.NOT_LEAD.value
+                            business.lead_decision_reason = "instagram_missing"
+                            skipped_no_instagram += 1
+                            checked_candidates += 1
+                            _history_checked(business, "no_instagram")
+                            continue
+
+                        result = await website_presence_verifier.verify_business_website_presence(
+                            business,
+                            runtime_presence_search_provider,
+                        )
+                        website_presence_verifier.apply_website_presence_result(
+                            business, result
+                        )
+                        presence_budget = search_budget_snapshot(
+                            runtime_presence_search_provider
+                        )
+                        if presence_budget is not None:
+                            website_presence_requests_used = presence_budget.used_requests
+                        else:
+                            website_presence_requests_used += result.requests_used
+
+                        if result.status is WebsitePresenceStatus.PRESENT:
+                            business.lead_decision = LeadDecision.NOT_LEAD.value
+                            business.lead_decision_reason = "website_present"
+                            skipped_website_present += 1
+                            if result.source and result.source.value == "maps":
+                                maps_presence_vetoes += 1
+                            else:
+                                search_presence_vetoes += 1
+                            if any("hosted_builder" in item for item in result.evidence):
+                                hosted_site_vetoes += 1
+                            checked_candidates += 1
+                            _history_checked(
+                                business,
+                                "website_present_maps"
+                                if result.source and result.source.value == "maps"
+                                else "website_present_search",
+                            )
+                        elif result.status is WebsitePresenceStatus.ABSENT_CONFIRMED:
+                            business.lead_decision = LeadDecision.LEAD.value
+                            business.lead_decision_reason = "website_absent_confirmed"
+                            website_absent_confirmed += 1
+                            checked_candidates += 1
+                            business.task_id = task_id
+                            if business.is_lead:
+                                leads.append(business)
+                                _history_checked(business, "lead")
+                            else:
+                                _history_checked(business, "other_deterministic_exclusion")
+                        elif result.status is WebsitePresenceStatus.TECHNICAL_ERROR:
+                            business.lead_decision = LeadDecision.UNCERTAIN.value
+                            business.lead_decision_reason = "website_presence_technical_error"
+                            skipped_uncertain_website += 1
+                            website_presence_technical_errors += 1
+                            _history_release(business)
+                        else:
+                            business.lead_decision = LeadDecision.UNCERTAIN.value
+                            business.lead_decision_reason = "website_presence_uncertain"
+                            skipped_uncertain_website += 1
+                            website_presence_uncertain += 1
+                            checked_candidates += 1
+                            _history_checked(business, "website_uncertain")
+
+                elif unique_batch:
                     missing_instagram_before = tuple(
                         business
                         for business in unique_batch
@@ -978,23 +1161,32 @@ async def run_search(
                             business.lead_decision = ""
                             business.lead_decision_reason = ""
 
-                    # Отбираем валидные лиды из батча
-                    for b in unique_batch:
-                        if b.is_lead:
-                            b.task_id = task_id
-                            leads.append(b)
-                        elif not _qualification_contact_available(b):
+                    for business in unique_batch:
+                        if business.is_lead:
+                            business.task_id = task_id
+                            leads.append(business)
+                            _history_checked(business, "lead")
+                        elif not _qualification_contact_available(business):
                             if config.LEAD_CONTACTABILITY_MODE == "instagram_only":
                                 skipped_no_instagram += 1
+                                _history_checked(business, "no_instagram")
                             else:
                                 skipped_no_contact += 1
-                        elif b.website_status == "good website":
+                                _history_checked(business, "other_deterministic_exclusion")
+                        elif business.website_status == "good website":
                             skipped_good_site += 1
+                            _history_checked(business, "website_present_maps")
                         elif (
-                            b.website_status == "uncertain website"
-                            or b.lead_decision == LeadDecision.UNCERTAIN.value
+                            business.website_status == "uncertain website"
+                            or business.lead_decision == LeadDecision.UNCERTAIN.value
                         ):
                             skipped_uncertain_website += 1
+                            if business.site_quality == "technical_error":
+                                _history_release(business)
+                            else:
+                                _history_checked(business, "website_uncertain")
+                        else:
+                            _history_checked(business, "other_deterministic_exclusion")
 
                 decision = _decide(remaining_queries=active_remaining_queries)
                 if not decision.should_continue:
@@ -1101,6 +1293,60 @@ async def run_search(
                 f"\n⚠️ Запрошено {target_leads} лідів, "
                 f"знайдено лише {len(leads)} підходящих."
             )
+        if verified_no_site:
+            history_payload = {
+                "event": "candidate_history",
+                "task_id": task_id,
+                "mode": config.CANDIDATE_HISTORY_MODE,
+                "newly_checked": checked_candidates,
+                "previously_checked_skips": skipped_previously_checked,
+                "claimed_elsewhere_skips": skipped_claimed_elsewhere,
+                "retryable_releases": retryable_claim_releases,
+            }
+            presence_payload = {
+                "event": "website_presence_verification",
+                "task_id": task_id,
+                "mode": config.WEBSITE_PRESENCE_VERIFICATION_MODE,
+                "maps_presence_vetoes": maps_presence_vetoes,
+                "search_presence_vetoes": search_presence_vetoes,
+                "hosted_site_vetoes": hosted_site_vetoes,
+                "absent_confirmed": website_absent_confirmed,
+                "uncertain": website_presence_uncertain,
+                "technical_errors": website_presence_technical_errors,
+                "requests_used": website_presence_requests_used,
+                "requests_max": config.MAX_WEBSITE_PRESENCE_SEARCH_REQUESTS_PER_TASK,
+            }
+            log.info(
+                "candidate_history %s",
+                json.dumps(history_payload, sort_keys=True, separators=(",", ":")),
+            )
+            log.info(
+                "website_presence_verification %s",
+                json.dumps(presence_payload, sort_keys=True, separators=(",", ":")),
+            )
+            await progress.update(
+                "main",
+                f"✅ Готово!\n"
+                f"Відкрито карток Google Maps: {visited}/{policy.max_discovery_cards}\n"
+                f"Перевірено нових кандидатів: {checked_candidates}/{policy.max_candidates}\n"
+                f"Знайдено валідних лідів: {len(leads)}/{target_leads}\n"
+                f"Пропущено вже перевірених: {skipped_previously_checked}\n"
+                f"Пропущено — перевіряються іншим завданням: {skipped_claimed_elsewhere}\n"
+                f"Пропущено без Instagram: {skipped_no_instagram}\n"
+                f"Пропущено — сайт знайдено: {skipped_website_present}\n"
+                f"Пропущено — сайт не вдалося надійно перевірити: {skipped_uncertain_website}\n"
+                f"Підтверджено без сайту: {website_absent_confirmed}\n"
+                f"Перевірок наявності сайту: {website_presence_requests_used}/"
+                f"{config.MAX_WEBSITE_PRESENCE_SEARCH_REQUESTS_PER_TASK}\n"
+                f"➡️ Усього лідів у таблиці: {len(leads)}\n"
+                f"Причина зупинки: {reason}"
+                + shortage
+                + (f"\n{opti_summary}" if opti_summary else ""),
+                force=True,
+            )
+            if progress_callback and leads:
+                await progress_callback(reporter.format_leads_summary(leads))
+            return out_path
         await progress.update(
             "main",
             f"✅ Готово!\n"
@@ -1136,6 +1382,9 @@ async def run_search(
             )
             await _finalize_user_stop()
             return None
+        if config.CANDIDATE_HISTORY_MODE == "apply":
+            candidate_history.release_unfinished_candidate_claims(task_id)
+            claimed_history_keys.clear()
         _persist_progress("error")
         db.update_task_status(
             task_id,
@@ -1147,6 +1396,9 @@ async def run_search(
             await progress_callback(f"❌ Помилка: {type(e).__name__}: {e}")
         raise
     finally:
+        if config.CANDIDATE_HISTORY_MODE == "apply" and claimed_history_keys:
+            candidate_history.release_unfinished_candidate_claims(task_id)
+            claimed_history_keys.clear()
         if runtime_rendered_audit is not None:
             try:
                 await runtime_rendered_audit.close()

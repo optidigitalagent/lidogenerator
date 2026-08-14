@@ -96,15 +96,24 @@ def build_brave_search_query(request: SearchRequest) -> str:
     city = _clean_query_value(request.city)
     phone = _clean_query_value(request.phone or "")
     address = _clean_query_value(request.address or "")
+    instagram = _clean_query_value(request.instagram_url or "")
 
     def render(
         current_name: str = name,
         current_city: str = city,
         current_phone: str = phone,
         current_address: str = address,
+        current_instagram: str = instagram,
     ) -> str:
         suffix = " ".join(
-            part for part in (current_city, current_phone, current_address) if part
+            part
+            for part in (
+                current_city,
+                current_phone,
+                current_address,
+                current_instagram,
+            )
+            if part
         )
         return f'"{current_name}"' + (f" {suffix}" if suffix else "")
 
@@ -122,12 +131,24 @@ def build_brave_search_query(request: SearchRequest) -> str:
             return query
         address = ""
 
-    query = render(current_address="")
+    if instagram:
+        instagram = _prefix_that_fits(
+            instagram,
+            lambda candidate: render(
+                current_address="", current_instagram=candidate
+            ),
+        )
+        query = render(current_address="", current_instagram=instagram)
+        if _fits_brave_query(query):
+            return query
+        instagram = ""
+
+    query = render(current_address="", current_instagram="")
     if _fits_brave_query(query):
         return query
 
     phone = ""
-    query = render(current_phone="", current_address="")
+    query = render(current_phone="", current_address="", current_instagram="")
     if _fits_brave_query(query):
         return query
 

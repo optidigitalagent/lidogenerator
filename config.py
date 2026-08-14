@@ -65,6 +65,24 @@ if LEAD_CONTACTABILITY_MODE not in {"instagram_only", "multi_channel"}:
         "LEAD_CONTACTABILITY_MODE must be one of: instagram_only, multi_channel"
     )
 
+LEAD_WEBSITE_POLICY = os.getenv(
+    "LEAD_WEBSITE_POLICY", "legacy_no_site_or_bad"
+).strip().casefold()
+if LEAD_WEBSITE_POLICY not in {"legacy_no_site_or_bad", "verified_no_site_only"}:
+    raise ValueError(
+        "LEAD_WEBSITE_POLICY must be one of: legacy_no_site_or_bad, verified_no_site_only"
+    )
+
+WEBSITE_PRESENCE_VERIFICATION_MODE = os.getenv(
+    "WEBSITE_PRESENCE_VERIFICATION_MODE", "off"
+).strip().casefold()
+if WEBSITE_PRESENCE_VERIFICATION_MODE not in {"off", "apply"}:
+    raise ValueError("WEBSITE_PRESENCE_VERIFICATION_MODE must be one of: off, apply")
+
+CANDIDATE_HISTORY_MODE = os.getenv("CANDIDATE_HISTORY_MODE", "off").strip().casefold()
+if CANDIDATE_HISTORY_MODE not in {"off", "apply"}:
+    raise ValueError("CANDIDATE_HISTORY_MODE must be one of: off, apply")
+
 
 def _environment_integer(
     name: str,
@@ -150,6 +168,18 @@ MAX_WEBSITE_SEARCH_REQUESTS_PER_TASK = _environment_integer(
     "0",
     0,
     1000,
+)
+MAX_WEBSITE_PRESENCE_SEARCH_REQUESTS_PER_TASK = _environment_integer(
+    "MAX_WEBSITE_PRESENCE_SEARCH_REQUESTS_PER_TASK",
+    "150",
+    0,
+    1000,
+)
+CANDIDATE_HISTORY_CLAIM_LEASE_SECONDS = _environment_integer(
+    "CANDIDATE_HISTORY_CLAIM_LEASE_SECONDS",
+    "7200",
+    60,
+    86400,
 )
 
 INSTAGRAM_SEARCH_PROVIDER = os.getenv(
