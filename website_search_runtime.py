@@ -77,13 +77,20 @@ class UnavailableSearchProvider(SearchProvider):
         raise ProviderUnavailable(self._reason)
 
 
-def build_configured_search_provider() -> SearchProvider | None:
+def build_configured_search_provider(*, max_requests: int | None = None) -> SearchProvider | None:
+    request_limit = (
+        config.MAX_WEBSITE_SEARCH_REQUESTS_PER_TASK
+        if max_requests is None
+        else max_requests
+    )
+    if type(request_limit) is not int or request_limit < 0:
+        raise ValueError("max_requests must be a non-negative integer")
     if config.WEBSITE_SEARCH_PROVIDER == "none":
         return None
     if config.WEBSITE_SEARCH_PROVIDER == "brave":
         if not config.BRAVE_SEARCH_API_KEY:
             return UnavailableSearchProvider("Brave Search API key is not configured")
-        if config.MAX_WEBSITE_SEARCH_REQUESTS_PER_TASK <= 0:
+        if request_limit <= 0:
             return UnavailableSearchProvider("website search request budget is disabled")
         settings = BraveSearchSettings(
             api_key=config.BRAVE_SEARCH_API_KEY,
@@ -96,12 +103,12 @@ def build_configured_search_provider() -> SearchProvider | None:
         )
         return BudgetedSearchProvider(
             BraveSearchProvider(settings),
-            max_requests=config.MAX_WEBSITE_SEARCH_REQUESTS_PER_TASK,
+            max_requests=request_limit,
         )
 
     if not config.OPENAI_API_KEY:
         return UnavailableSearchProvider("OpenAI API key is not configured")
-    if config.MAX_WEBSITE_SEARCH_REQUESTS_PER_TASK <= 0:
+    if request_limit <= 0:
         return UnavailableSearchProvider("website search request budget is disabled")
     settings = OpenAIWebSearchSettings(
         api_key=config.OPENAI_API_KEY,
@@ -116,7 +123,7 @@ def build_configured_search_provider() -> SearchProvider | None:
     )
     return BudgetedSearchProvider(
         OpenAIWebSearchProvider(settings),
-        max_requests=config.MAX_WEBSITE_SEARCH_REQUESTS_PER_TASK,
+        max_requests=request_limit,
     )
 
 

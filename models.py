@@ -51,6 +51,11 @@ class Business:
     website_audit_error: str = ""
     lead_decision: str = ""
     lead_decision_reason: str = ""
+    website_presence_status: str = ""
+    website_presence_source: str = ""
+    website_presence_resolved_url: str = ""
+    website_presence_evidence: str = ""
+    website_presence_error: str = ""
 
     # --- результаты social_checker ---
     instagram_active: bool = False      # активен ли Instagram
@@ -103,6 +108,15 @@ class Business:
     @property
     def is_lead(self) -> bool:
         """Require website need and the contact allowed by the active mode."""
+        if config.LEAD_WEBSITE_POLICY == "verified_no_site_only":
+            from website_presence import classify_website_presence_url
+
+            return (
+                self.contactability.instagram_available
+                and self.website_presence_status == "absent_confirmed"
+                and not classify_website_presence_url(self.website)
+                and not self.website_presence_resolved_url
+            )
         if self.lead_decision:
             return self.lead_decision == LeadDecision.LEAD.value
         if config.LEAD_CONTACTABILITY_MODE == "instagram_only":
