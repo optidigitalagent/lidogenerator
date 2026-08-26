@@ -149,9 +149,14 @@ def init_db() -> None:
         )
         _migrate_tasks(conn)
         _migrate_businesses(conn)
-        from candidate_history import backfill_persisted_leads, initialize_history_schema
+        from candidate_history import (
+            backfill_persisted_leads,
+            initialize_history_schema,
+            reconcile_city_alias_scopes,
+        )
 
         initialize_history_schema(conn)
+        reconcile_city_alias_scopes(conn)
         backfill_persisted_leads(conn)
 
 

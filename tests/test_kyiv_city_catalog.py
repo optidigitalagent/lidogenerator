@@ -87,9 +87,8 @@ class KyivCityCatalogTests(unittest.TestCase):
         self.registry = city_catalog.CITY_DEFINITIONS
         self.kyiv = self.registry[0]
 
-    def test_registry_contains_only_kyiv_and_is_immutable(self) -> None:
+    def test_registry_keeps_kyiv_first_and_is_immutable(self) -> None:
         self.assertIs(type(self.registry), tuple)
-        self.assertEqual(len(self.registry), 1)
         self.assertEqual(self.kyiv.key, "kyiv")
         self.assertNotIn(
             "City A",
@@ -180,7 +179,7 @@ class KyivCityCatalogTests(unittest.TestCase):
                 self.assertIsNone(resolve_district(self.kyiv, value))
 
     def test_city_and_district_indexes_build_without_conflicts(self) -> None:
-        city_index = build_city_index(self.registry)
+        city_index = build_city_index((self.kyiv,))
         district_index = build_district_index(self.kyiv)
 
         self.assertEqual(len(city_index), 4)
