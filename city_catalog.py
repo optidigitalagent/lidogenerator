@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
-
+from dataclasses import dataclass
 
 _IDENTIFIER_PATTERN = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*\Z")
 
@@ -274,6 +273,121 @@ CITY_DEFINITIONS: tuple[CityDefinition, ...] = (
                 ),
             ),
         ),
+    ),
+    CityDefinition(
+        key="lviv",
+        canonical_name="Львів",
+        aliases=("Львов", "Lviv", "Lvov"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="kharkiv",
+        canonical_name="Харків",
+        aliases=("Харьков", "Kharkiv", "Kharkov"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="dnipro",
+        canonical_name="Дніпро",
+        aliases=(
+            "Днепр",
+            "Dnipro",
+            "Dnepr",
+            "Дніпропетровськ",
+            "Днепропетровск",
+            "Dnipropetrovsk",
+        ),
+        districts=(),
+    ),
+    CityDefinition(
+        key="zaporizhzhia",
+        canonical_name="Запоріжжя",
+        aliases=("Запорожье", "Zaporizhzhia", "Zaporizhia", "Zaporozhye"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="odesa",
+        canonical_name="Одеса",
+        aliases=("Одесса", "Odesa", "Odessa"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="kryvyi_rih",
+        canonical_name="Кривий Ріг",
+        aliases=("Кривой Рог", "Kryvyi Rih", "Krivoy Rog"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="kropyvnytskyi",
+        canonical_name="Кропивницький",
+        aliases=("Кировоград", "Kropyvnytskyi", "Kirovohrad"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="mykolaiv",
+        canonical_name="Миколаїв",
+        aliases=("Николаев", "Mykolaiv", "Nikolaev"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="vinnytsia",
+        canonical_name="Вінниця",
+        aliases=("Винница", "Виница", "Vinnytsia", "Vinnitsa"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="chernihiv",
+        canonical_name="Чернігів",
+        aliases=("Чернигов", "Chernihiv", "Chernigov"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="cherkasy",
+        canonical_name="Черкаси",
+        aliases=("Черкассы", "Cherkasy", "Cherkassy"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="rivne",
+        canonical_name="Рівне",
+        aliases=("Ровно", "Rivne", "Rovno"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="lutsk",
+        canonical_name="Луцьк",
+        aliases=("Луцк", "Lutsk"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="ternopil",
+        canonical_name="Тернопіль",
+        aliases=("Тернополь", "Ternopil"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="ivano_frankivsk",
+        canonical_name="Івано-Франківськ",
+        aliases=("Ивано-Франковск", "Ivano-Frankivsk", "Ivano Frankivsk"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="chernivtsi",
+        canonical_name="Чернівці",
+        aliases=("Черновцы", "Chernivtsi", "Chernovtsy"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="uzhhorod",
+        canonical_name="Ужгород",
+        aliases=("Uzhhorod", "Uzhgorod"),
+        districts=(),
+    ),
+    CityDefinition(
+        key="khmelnytskyi",
+        canonical_name="Хмельницький",
+        aliases=("Хмельницкий", "Khmelnytskyi", "Khmelnitskyi", "Khmelnitsky"),
+        districts=(),
     ),
 )
 

@@ -393,10 +393,10 @@ class EnabledDistrictTests(unittest.TestCase):
 
 
 class ProductionDataContractTests(unittest.TestCase):
-    def test_production_registry_exists_as_a_single_city_tuple(self) -> None:
+    def test_production_registry_exists_as_an_immutable_city_tuple(self) -> None:
         self.assertTrue(hasattr(city_catalog, "CITY_DEFINITIONS"))
         self.assertIs(type(city_catalog.CITY_DEFINITIONS), tuple)
-        self.assertEqual(len(city_catalog.CITY_DEFINITIONS), 1)
+        self.assertEqual(len(city_catalog.CITY_DEFINITIONS), 19)
         self.assertEqual(city_catalog.CITY_DEFINITIONS[0].key, "kyiv")
 
     def test_production_registry_builds_a_kyiv_index(self) -> None:
@@ -439,7 +439,27 @@ class ProductionDataContractTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(city.canonical_name for city in city_catalog.CITY_DEFINITIONS),
-            ("Київ",),
+            (
+                "Київ",
+                "Львів",
+                "Харків",
+                "Дніпро",
+                "Запоріжжя",
+                "Одеса",
+                "Кривий Ріг",
+                "Кропивницький",
+                "Миколаїв",
+                "Вінниця",
+                "Чернігів",
+                "Черкаси",
+                "Рівне",
+                "Луцьк",
+                "Тернопіль",
+                "Івано-Франківськ",
+                "Чернівці",
+                "Ужгород",
+                "Хмельницький",
+            ),
         )
         self.assertFalse(hasattr(city_catalog, "CITY_CATALOG"))
 
