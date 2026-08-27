@@ -278,7 +278,52 @@ CITY_DEFINITIONS: tuple[CityDefinition, ...] = (
         key="lviv",
         canonical_name="Львів",
         aliases=("Львов", "Lviv", "Lvov"),
-        districts=(),
+        districts=(
+            DistrictDefinition(
+                key="halytskyi",
+                display_name="Галицький район",
+                query_text="Галицький район",
+                aliases=("Галицький", "Галицкий район", "Галицкий"),
+            ),
+            DistrictDefinition(
+                key="zaliznychnyi",
+                display_name="Залізничний район",
+                query_text="Залізничний район",
+                aliases=(
+                    "Залізничний",
+                    "Железнодорожный район",
+                    "Железнодорожный",
+                ),
+            ),
+            DistrictDefinition(
+                key="lychakivskyi",
+                display_name="Личаківський район",
+                query_text="Личаківський район",
+                aliases=("Личаківський", "Лычаковский район", "Лычаковский"),
+            ),
+            DistrictDefinition(
+                key="sykhivskyi",
+                display_name="Сихівський район",
+                query_text="Сихівський район",
+                aliases=("Сихівський", "Сиховский район", "Сиховский"),
+            ),
+            DistrictDefinition(
+                key="frankivskyi",
+                display_name="Франківський район",
+                query_text="Франківський район",
+                aliases=("Франківський", "Франковский район", "Франковский"),
+            ),
+            DistrictDefinition(
+                key="shevchenkivskyi",
+                display_name="Шевченківський район",
+                query_text="Шевченківський район",
+                aliases=(
+                    "Шевченківський",
+                    "Шевченковский район",
+                    "Шевченковский",
+                ),
+            ),
+        ),
     ),
     CityDefinition(
         key="kharkiv",

@@ -83,6 +83,10 @@ CANDIDATE_HISTORY_MODE = os.getenv("CANDIDATE_HISTORY_MODE", "off").strip().case
 if CANDIDATE_HISTORY_MODE not in {"off", "apply"}:
     raise ValueError("CANDIDATE_HISTORY_MODE must be one of: off, apply")
 
+DEEP_DISCOVERY_MODE = os.getenv("DEEP_DISCOVERY_MODE", "off").strip().casefold()
+if DEEP_DISCOVERY_MODE not in {"off", "apply"}:
+    raise ValueError("DEEP_DISCOVERY_MODE must be one of: off, apply")
+
 
 def _environment_integer(
     name: str,
