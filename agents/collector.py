@@ -16,6 +16,7 @@ from typing import AsyncIterator, Awaitable, Callable, List, Optional
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout, async_playwright
 
 import config
+from discovery_session import MapsDiscoverySession, normalize_maps_place_url
 from models import Business
 
 # Меняем User-Agent, чтобы меньше походить на бота
@@ -166,6 +167,7 @@ async def collect_stream(
     progress_callback: Optional[StreamProgressCallback] = None,
     stop_flag: Optional[Callable[[], bool]] = None,
     query_text: str | None = None,
+    discovery_session: MapsDiscoverySession | None = None,
 ) -> AsyncIterator[List[Business]]:
     """Асинхронный генератор: отдаёт бизнесы из Google Maps батчами.
 
@@ -191,7 +193,8 @@ async def collect_stream(
 
     url = _maps_search_url(niche, city, query_text)
 
-    visited_links: set = set()  # ссылки карточек, которые уже открывали
+    runtime_discovery_session = discovery_session or MapsDiscoverySession()
+    visited_link_keys: set[str] = set()  # ссылки, уже замеченные в этом потоке
     seen_keys: set = set()      # ключи дедупа (название+адрес+IG)
     seen_phones: set = set()    # телефоны (доп. защита от дублей)
     visited = 0                 # сколько карточек реально открыли
@@ -212,6 +215,11 @@ async def collect_stream(
 
             # Иногда Maps сразу открывает одну карточку вместо списка
             if "/maps/place/" in feed_page.url:
+                if stop_flag and stop_flag():
+                    return
+                if not runtime_discovery_session.claim_link(feed_page.url):
+                    return
+                runtime_discovery_session.record_card_opened()
                 b = await _extract_business(card_page, feed_page.url, niche, city)
                 visited += 1
                 if progress_callback:
@@ -234,15 +242,26 @@ async def collect_stream(
                 hrefs = await feed_page.eval_on_selector_all(
                     'div[role="feed"] a.hfpxzc', "els => els.map(e => e.href)"
                 )
-                new_links = [h for h in hrefs if h not in visited_links]
-                stale_rounds = 0 if new_links else stale_rounds + 1
+                new_links: list[str] = []
+                for href in hrefs:
+                    if not isinstance(href, str) or not href.strip():
+                        continue
+                    link_key = normalize_maps_place_url(href)
+                    if link_key in visited_link_keys:
+                        continue
+                    visited_link_keys.add(link_key)
+                    new_links.append(href)
 
                 # Открываем новые карточки на отдельной вкладке
+                task_new_links = 0
                 for link in new_links:
                     if (stop_flag and stop_flag()) or visited >= max_businesses:
                         break
-                    visited_links.add(link)
+                    if not runtime_discovery_session.claim_link(link):
+                        continue
+                    task_new_links += 1
                     visited += 1
+                    runtime_discovery_session.record_card_opened()
                     try:
                         b = await _extract_business(card_page, link, niche, city)
                     except Exception:
@@ -267,6 +286,8 @@ async def collect_stream(
                         batch = []
 
                     await _random_delay()  # пауза 3-6 сек между карточками
+
+                stale_rounds = 0 if task_new_links else stale_rounds + 1
 
                 if visited >= max_businesses:
                     break

@@ -26,6 +26,7 @@ import city_catalog
 import config
 import db
 from contactability import ContactChannel, lead_contact_bucket
+from discovery_session import MapsDiscoverySession
 from agents import (
     ai_scorer,
     collector,
@@ -60,7 +61,7 @@ from website_search_runtime import (
 from website_presence import WebsitePresenceStatus
 from niche_catalog import resolve_niche_plan
 from query_budget import allocate_query_budget
-from query_planner import build_query_queue
+from query_planner import QueryQueue, build_query_plan, build_query_queue
 from search_policy import (
     SearchPolicy,
     SearchProgress,
@@ -722,6 +723,14 @@ async def run_search(
     retryable_claim_releases = 0
     stop_reason: Optional[StopReason] = None
     seen_business_keys: set[tuple[str, ...]] = set()
+    deep_discovery_enabled = config.DEEP_DISCOVERY_MODE == "apply"
+    maps_discovery_session = MapsDiscoverySession(
+        dedupe_enabled=deep_discovery_enabled,
+    )
+    discovery_phase = "normal"
+    deep_phase_activated = False
+    normal_queries_completed = 0
+    deep_queries_completed = 0
     niche_plan = resolve_niche_plan(niche)
     city_definition = city_catalog.resolve_city(
         city,
@@ -774,13 +783,23 @@ async def run_search(
         if niche_plan.known and city_definition is not None
         else ()
     )
-    query_queue = build_query_queue(
-        niche=niche_plan.base_niche,
-        city=query_city,
-        niche_variants=niche_plan.primary_variants,
-        districts=district_fragments,
-        fallback_variants=niche_plan.fallback_variants,
-    )
+    query_arguments = {
+        "niche": niche_plan.base_niche,
+        "city": query_city,
+        "niche_variants": niche_plan.primary_variants,
+        "districts": district_fragments,
+        "fallback_variants": niche_plan.fallback_variants,
+    }
+    if deep_discovery_enabled:
+        query_plan = build_query_plan(**query_arguments)
+        normal_query_queue = query_plan.normal_queries
+        deep_query_queue = query_plan.deep_queries
+    else:
+        normal_query_queue = build_query_queue(**query_arguments)
+        deep_query_queue = QueryQueue(())
+    normal_queries_total = normal_query_queue.total_queries
+    deep_queries_total = deep_query_queue.total_queries
+    query_queue = normal_query_queue
 
     def _persist_progress(
         stage: str,
@@ -796,10 +815,27 @@ async def run_search(
         )
         snapshot = {
             "stage": stage,
+            "discovery_phase": discovery_phase,
             "targetLeads": target_leads,
             "visitedBusinesses": visited,
             "openedMapCards": visited,
+            "mapsLinksDiscovered": maps_discovery_session.maps_links_discovered,
+            "mapsLinksSkippedTaskDuplicate": (
+                maps_discovery_session.maps_links_skipped_task_duplicate
+            ),
+            "mapsCardsActuallyOpened": visited,
             "checkedCandidates": checked_candidates,
+            "previouslyCheckedHistorySkips": skipped_previously_checked,
+            "newCandidatesChecked": checked_candidates,
+            "newCandidateRatio": (
+                checked_candidates / visited if visited else 0.0
+            ),
+            "taskDuplicateLinkRate": maps_discovery_session.task_duplicate_link_rate,
+            "normalQueriesTotal": normal_queries_total,
+            "normalQueriesCompleted": normal_queries_completed,
+            "deepQueriesTotal": deep_queries_total,
+            "deepQueriesCompleted": deep_queries_completed,
+            "deepPhaseActivated": deep_phase_activated,
             "qualifiedLeads": len(leads),
             "addedNoSite": added_no_site,
             "addedBadSite": added_bad_site,
@@ -906,6 +942,9 @@ async def run_search(
                 "main",
                 f"🔎 Шукаю {target_leads} перевірених no-site лідів: «{niche}» у місті {city}\n"
                 f"Відкрито карток Google Maps: {visited}/{policy.max_discovery_cards}\n"
+                "Пропущено повторних Maps-посилань до відкриття: "
+                f"{maps_discovery_session.maps_links_skipped_task_duplicate}\n"
+                f"Фаза пошуку: {discovery_phase}\n"
                 f"Перевірено нових кандидатів: {checked_candidates}/{policy.max_candidates}\n"
                 f"Знайдено валідних лідів: {len(leads)}/{target_leads}\n"
                 f"Пропущено вже перевірених: {skipped_previously_checked}\n"
@@ -925,6 +964,9 @@ async def run_search(
             f"Запрошено лідів: {target_leads}\n"
             f"Переглянуто бізнесів: {visited}\n"
             f"Відкрито карток Google Maps: {visited}/{policy.max_discovery_cards}\n"
+            "Пропущено повторних Maps-посилань до відкриття: "
+            f"{maps_discovery_session.maps_links_skipped_task_duplicate}\n"
+            f"Фаза пошуку: {discovery_phase}\n"
             f"Перевірено унікальних кандидатів: {checked_candidates}/{policy.max_candidates}\n"
             f"Знайдено валідних лідів: {len(leads)}/{target_leads}\n"
             f"{_contactability_progress_lines()}"
@@ -972,7 +1014,34 @@ async def run_search(
         db.update_task_status(task_id, "checking")
         _persist_progress("checking")
 
-        while not query_queue.exhausted:
+        while True:
+            if query_queue.exhausted:
+                if discovery_phase == "normal" and not deep_query_queue.exhausted:
+                    decision = _decide(
+                        remaining_queries=deep_query_queue.remaining_queries,
+                    )
+                    if decision.stop_reason is StopReason.USER_STOPPED:
+                        raise SearchStopped()
+                    if decision.should_continue:
+                        discovery_phase = "deep"
+                        deep_phase_activated = True
+                        query_queue = deep_query_queue
+                        _persist_progress("checking")
+                        await progress.update(
+                            "deep_discovery",
+                            "🔎 Основні запити вичерпано — шукаю глибше по районах…",
+                            force=True,
+                        )
+                        continue
+                    stop_reason = decision.stop_reason
+                    break
+
+                decision = _decide(remaining_queries=0)
+                if decision.stop_reason is StopReason.USER_STOPPED:
+                    raise SearchStopped()
+                stop_reason = decision.stop_reason
+                break
+
             decision = _decide(remaining_queries=query_queue.remaining_queries)
             if not decision.should_continue:
                 stop_reason = decision.stop_reason
@@ -1024,6 +1093,7 @@ async def run_search(
                 progress_callback=on_visit,
                 stop_flag=stop_flag,
                 query_text=search_query.text,
+                discovery_session=maps_discovery_session,
             ):
                 decision = _decide(remaining_queries=active_remaining_queries)
                 if decision.stop_reason is StopReason.USER_STOPPED:
@@ -1200,16 +1270,13 @@ async def run_search(
             else:
                 stream_exhausted = True
 
+            if stream_exhausted:
+                if discovery_phase == "normal":
+                    normal_queries_completed += 1
+                else:
+                    deep_queries_completed += 1
             if stop_reason is not None:
                 break
-            if stream_exhausted:
-                decision = _decide(remaining_queries=query_queue.remaining_queries)
-                if not decision.should_continue:
-                    stop_reason = decision.stop_reason
-                if stop_reason is StopReason.USER_STOPPED:
-                    raise SearchStopped()
-                if stop_reason is not None:
-                    break
 
         # --- Почему остановились ---
         if stop_reason is None:
@@ -1278,6 +1345,38 @@ async def run_search(
                 separators=(",", ":"),
             ),
         )
+        discovery_telemetry = {
+            "event": "maps_discovery_efficiency",
+            "task_id": task_id,
+            "mode": config.DEEP_DISCOVERY_MODE,
+            "discovery_phase": discovery_phase,
+            "normal_queries_total": normal_queries_total,
+            "normal_queries_completed": normal_queries_completed,
+            "deep_queries_total": deep_queries_total,
+            "deep_queries_completed": deep_queries_completed,
+            "deep_phase_activated": deep_phase_activated,
+            "maps_links_discovered": maps_discovery_session.maps_links_discovered,
+            "maps_links_skipped_task_duplicate": (
+                maps_discovery_session.maps_links_skipped_task_duplicate
+            ),
+            "maps_cards_actually_opened": visited,
+            "previously_checked_history_skips": skipped_previously_checked,
+            "new_candidates_checked": checked_candidates,
+            "new_candidate_ratio": (
+                checked_candidates / visited if visited else 0.0
+            ),
+            "task_duplicate_link_rate": (
+                maps_discovery_session.task_duplicate_link_rate
+            ),
+        }
+        log.info(
+            "maps_discovery_efficiency %s",
+            json.dumps(
+                discovery_telemetry,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
 
         # --- Финальный отчёт ---
         added_no_site, added_bad_site = _added_counts()
@@ -1328,7 +1427,11 @@ async def run_search(
                 "main",
                 f"✅ Готово!\n"
                 f"Відкрито карток Google Maps: {visited}/{policy.max_discovery_cards}\n"
+                "Пропущено повторних Maps-посилань до відкриття: "
+                f"{maps_discovery_session.maps_links_skipped_task_duplicate}\n"
                 f"Перевірено нових кандидатів: {checked_candidates}/{policy.max_candidates}\n"
+                f"Запити: normal {normal_queries_completed}/{normal_queries_total}, "
+                f"deep {deep_queries_completed}/{deep_queries_total}\n"
                 f"Знайдено валідних лідів: {len(leads)}/{target_leads}\n"
                 f"Пропущено вже перевірених: {skipped_previously_checked}\n"
                 f"Пропущено — перевіряються іншим завданням: {skipped_claimed_elsewhere}\n"
@@ -1353,7 +1456,11 @@ async def run_search(
             f"Запрошено лідів: {target_leads}\n"
             f"Переглянуто бізнесів: {visited}\n"
             f"Відкрито карток Google Maps: {visited}/{policy.max_discovery_cards}\n"
+            "Пропущено повторних Maps-посилань до відкриття: "
+            f"{maps_discovery_session.maps_links_skipped_task_duplicate}\n"
             f"Перевірено унікальних кандидатів: {checked_candidates}/{policy.max_candidates}\n"
+            f"Запити: normal {normal_queries_completed}/{normal_queries_total}, "
+            f"deep {deep_queries_completed}/{deep_queries_total}\n"
             f"{_contactability_progress_lines()}"
             f"{first_party_recovery_line}"
             f"Пропущено з гарним сайтом: {skipped_good_site}\n"

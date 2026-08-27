@@ -62,8 +62,8 @@ class CityAliasContractTests(unittest.TestCase):
             "vinnytsia",
         )
 
-    def test_new_cities_have_no_district_discovery(self) -> None:
-        for city in city_catalog.CITY_DEFINITIONS[1:]:
+    def test_cities_other_than_kyiv_and_lviv_have_no_district_discovery(self) -> None:
+        for city in city_catalog.CITY_DEFINITIONS[2:]:
             with self.subTest(city=city.key):
                 self.assertEqual(city.districts, ())
 

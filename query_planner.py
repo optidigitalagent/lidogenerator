@@ -139,6 +139,32 @@ class QueryQueue:
         return query, QueryQueue(self.queries, self.next_index + 1)
 
 
+@dataclass(frozen=True)
+class QueryPlan:
+    """An explicit normal phase followed by an optional deep phase."""
+
+    normal_queries: QueryQueue
+    deep_queries: QueryQueue
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.normal_queries, QueryQueue):
+            raise TypeError("normal_queries must be a QueryQueue")
+        if not isinstance(self.deep_queries, QueryQueue):
+            raise TypeError("deep_queries must be a QueryQueue")
+        normal_keys = {query.key for query in self.normal_queries.queries}
+        deep_keys = {query.key for query in self.deep_queries.queries}
+        if normal_keys & deep_keys:
+            raise ValueError("normal and deep queries must not overlap")
+
+    @property
+    def normal_queries_total(self) -> int:
+        return self.normal_queries.total_queries
+
+    @property
+    def deep_queries_total(self) -> int:
+        return self.deep_queries.total_queries
+
+
 def _normalize_string_sequence(values: object, name: str) -> tuple[str, ...]:
     if isinstance(values, str) or not isinstance(values, Sequence):
         raise TypeError(f"{name} must be a sequence of strings, not {type(values).__name__}")
@@ -230,3 +256,58 @@ def build_query_queue(
     if max_queries is not None:
         planned = planned[:max_queries]
     return QueryQueue(tuple(planned))
+
+
+def build_query_plan(
+    niche: str,
+    city: str,
+    *,
+    niche_variants: Sequence[str] = (),
+    districts: Sequence[str] = (),
+    fallback_variants: Sequence[str] = (),
+    max_normal_queries: int | None = None,
+) -> QueryPlan:
+    """Build a stable broad phase plus primary-variant × district queries.
+
+    Fallback variants remain city-wide in the normal phase. The deep phase is
+    deliberately bounded to the curated primary variants and verified city
+    districts, and it is kept separate so it cannot dilute normal allocation.
+    """
+
+    normal_queries = build_query_queue(
+        niche,
+        city,
+        niche_variants=niche_variants,
+        districts=districts,
+        fallback_variants=fallback_variants,
+        max_queries=max_normal_queries,
+    )
+    normalized_niche = _normalize_non_empty_string(niche, "niche")
+    normalized_city = _normalize_non_empty_string(city, "city")
+    normalized_variants = _normalize_string_sequence(
+        niche_variants,
+        "niche_variants",
+    )
+    normalized_districts = _normalize_string_sequence(districts, "districts")
+
+    seen_keys = {query.key for query in normal_queries.queries}
+    deep_queries: list[SearchQuery] = []
+    for variant in normalized_variants:
+        for district in normalized_districts:
+            query = SearchQuery(
+                text=f"{variant} {district} {normalized_city}",
+                niche=normalized_niche,
+                city=normalized_city,
+                kind=QueryKind.DISTRICT_VARIANT,
+                variant=variant,
+                district=district,
+            )
+            if query.key in seen_keys:
+                continue
+            seen_keys.add(query.key)
+            deep_queries.append(query)
+
+    return QueryPlan(
+        normal_queries=normal_queries,
+        deep_queries=QueryQueue(tuple(deep_queries)),
+    )

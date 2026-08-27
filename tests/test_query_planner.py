@@ -5,8 +5,10 @@ from dataclasses import FrozenInstanceError
 
 from query_planner import (
     QueryKind,
+    QueryPlan,
     QueryQueue,
     SearchQuery,
+    build_query_plan,
     build_query_queue,
     normalize_query_key,
 )
@@ -365,6 +367,95 @@ class BuildQueryQueueTests(unittest.TestCase):
 
     def test_district_variant_enum_value_remains_compatible(self) -> None:
         self.assertEqual(QueryKind.DISTRICT_VARIANT.value, "district_variant")
+
+
+class BuildQueryPlanTests(unittest.TestCase):
+    def test_preserves_normal_order_and_builds_deterministic_deep_phase(self) -> None:
+        plan = build_query_plan(
+            "Service",
+            "City",
+            niche_variants=("Primary 2", "Primary 3"),
+            districts=("D1", "D2"),
+            fallback_variants=("Fallback 1",),
+        )
+
+        self.assertEqual(
+            [query.text for query in plan.normal_queries.queries],
+            [
+                "Service City",
+                "Primary 2 City",
+                "Primary 3 City",
+                "Service D1 City",
+                "Service D2 City",
+                "Fallback 1 City",
+            ],
+        )
+        self.assertEqual(
+            [query.text for query in plan.deep_queries.queries],
+            [
+                "Primary 2 D1 City",
+                "Primary 2 D2 City",
+                "Primary 3 D1 City",
+                "Primary 3 D2 City",
+            ],
+        )
+        self.assertTrue(
+            all(
+                query.kind is QueryKind.DISTRICT_VARIANT
+                for query in plan.deep_queries.queries
+            )
+        )
+
+    def test_deep_phase_deduplicates_against_normal_and_itself(self) -> None:
+        plan = build_query_plan(
+            "Service",
+            "City",
+            niche_variants=("Service D1", " primary ", "PRIMARY"),
+            districts=("D1", " d1 "),
+        )
+
+        all_queries = (*plan.normal_queries.queries, *plan.deep_queries.queries)
+        self.assertEqual(len({query.key for query in all_queries}), len(all_queries))
+        self.assertNotIn(
+            "Service D1 City",
+            [query.text for query in plan.deep_queries.queries],
+        )
+
+    def test_no_district_city_has_normal_queries_only(self) -> None:
+        plan = build_query_plan(
+            "Service",
+            "Unknown City",
+            niche_variants=("Primary",),
+            districts=(),
+            fallback_variants=("Fallback",),
+        )
+
+        self.assertEqual(plan.normal_queries_total, 3)
+        self.assertEqual(plan.deep_queries_total, 0)
+        self.assertTrue(plan.deep_queries.exhausted)
+
+    def test_deep_phase_uses_primary_variants_not_fallback_variants(self) -> None:
+        plan = build_query_plan(
+            "Service",
+            "City",
+            niche_variants=("Primary",),
+            districts=("D1",),
+            fallback_variants=("Fallback",),
+        )
+
+        self.assertEqual(
+            [query.text for query in plan.deep_queries.queries],
+            ["Primary D1 City"],
+        )
+        self.assertNotIn(
+            "Fallback D1 City",
+            [query.text for query in plan.deep_queries.queries],
+        )
+
+    def test_query_plan_rejects_cross_phase_duplicate_text(self) -> None:
+        query = SearchQuery("Service City", "Service", "City", QueryKind.BASE)
+        with self.assertRaisesRegex(ValueError, "must not overlap"):
+            QueryPlan(QueryQueue((query,)), QueryQueue((query,)))
 
 
 class QueryQueueTests(unittest.TestCase):
