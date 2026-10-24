@@ -77,6 +77,23 @@ class CandidateHistoryTests(unittest.TestCase):
             CandidateClaimResult.CLAIMED,
         )
 
+    def test_selection_modes_do_not_share_website_exclusions_or_backfill(self):
+        legacy_id = db.create_task("стоматологія", "Харків", 1)
+        candidate_history.claim_candidate(self.scope, self.key, self.basis, legacy_id)
+        candidate_history.mark_candidate_checked(self.scope, self.key, legacy_id, "website_present_maps")
+        all_scope = candidate_history.scope_for_search_mode(self.scope, "ALL_COMPANIES")
+        all_id = db.create_task("стоматологія", "Харків", 1, search_mode="ALL_COMPANIES")
+        self.assertEqual(candidate_history.claim_candidate(all_scope, self.key, self.basis, all_id), CandidateClaimResult.CLAIMED)
+        self.business.task_id = all_id
+        self.business.search_mode = "ALL_COMPANIES"
+        db.save_businesses([self.business])
+        candidate_history.mark_candidate_checked(all_scope, self.key, all_id, "lead")
+        db.init_db()
+        self.assertEqual(candidate_history.claim_candidate(all_scope, self.key, self.basis, all_id + 1), CandidateClaimResult.ALREADY_CHECKED)
+        with sqlite3.connect(self.db_path) as conn:
+            outcome = conn.execute("SELECT last_outcome FROM candidate_history WHERE scope_key=? AND candidate_key=?", (self.scope, self.key)).fetchone()[0]
+        self.assertEqual(outcome, "website_present_maps")
+
     def test_active_other_claim_expired_takeover_and_release(self) -> None:
         now = datetime.now(timezone.utc)
         candidate_history.claim_candidate(

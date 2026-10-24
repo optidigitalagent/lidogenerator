@@ -15,6 +15,7 @@ import config
 import db
 from integrations import opti_outbox
 from search_runtime import SearchRuntime
+from website_pipeline import SearchMode
 
 log = logging.getLogger("lead_hunter.control_api")
 PREFIX = "/internal/opti/v1"
@@ -148,6 +149,7 @@ def search_dto(task: Mapping[str, Any]) -> dict[str, Any]:
         "niche": task["niche"],
         "city": task["city"],
         "targetLeads": int(task["count"]),
+        "searchMode": task.get("search_mode", SearchMode.WEBSITE_NEED.value),
         "status": task["status"],
         "initiatedVia": task.get("initiated_via") or "TELEGRAM",
         "createdAt": task["created_at"],
@@ -178,8 +180,12 @@ def _task_by_search_id(search_id: str) -> dict[str, Any]:
     return dict(row)
 
 
-def _normalized_create(value: Any) -> tuple[str, str, int]:
-    if not isinstance(value, dict) or set(value) != _CREATE_FIELDS:
+def _normalized_create(value: Any) -> tuple[str, str, int, str]:
+    if (
+        not isinstance(value, dict)
+        or not _CREATE_FIELDS <= set(value)
+        or set(value) - (_CREATE_FIELDS | {"searchMode"})
+    ):
         raise ControlError(400, "VALIDATION_ERROR", "Request fields are invalid")
     niche = value.get("niche")
     city = value.get("city")
@@ -196,7 +202,11 @@ def _normalized_create(value: Any) -> tuple[str, str, int]:
         raise ControlError(
             400, "VALIDATION_ERROR", "targetLeads must be an integer from 1 to 200"
         )
-    return niche.strip(), city.strip(), target
+    try:
+        mode = SearchMode(value.get("searchMode", SearchMode.ALL_COMPANIES.value))
+    except (ValueError, TypeError):
+        raise ControlError(400, "VALIDATION_ERROR", "searchMode is invalid") from None
+    return niche.strip(), city.strip(), target, mode.value
 
 
 async def health(request: web.Request) -> web.Response:
@@ -245,11 +255,13 @@ async def create_search(request: web.Request) -> web.Response:
         raise ControlError(
             400, "VALIDATION_ERROR", "Request body must be valid JSON"
         ) from None
-    niche, city, target = _normalized_create(body)
+    niche, city, target, mode = _normalized_create(body)
     existing = db.get_task_by_control_key(key)
     if existing is not None:
         row = dict(existing)
-        if (row["niche"], row["city"], int(row["count"])) != (niche, city, target):
+        if (
+            row["niche"], row["city"], int(row["count"]), row["search_mode"]
+        ) != (niche, city, target, mode):
             raise ControlError(
                 409,
                 "IDEMPOTENCY_KEY_REUSED",
@@ -263,13 +275,16 @@ async def create_search(request: web.Request) -> web.Response:
             target,
             initiated_via="OPTI",
             control_idempotency_key=key,
+            search_mode=mode,
         )
     except sqlite3.IntegrityError:
         existing = db.get_task_by_control_key(key)
         if existing is None:
             raise
         row = dict(existing)
-        if (row["niche"], row["city"], int(row["count"])) != (niche, city, target):
+        if (
+            row["niche"], row["city"], int(row["count"]), row["search_mode"]
+        ) != (niche, city, target, mode):
             raise ControlError(
                 409,
                 "IDEMPOTENCY_KEY_REUSED",

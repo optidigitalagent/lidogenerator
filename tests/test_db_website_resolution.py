@@ -60,6 +60,7 @@ class DatabaseWebsiteResolutionTests(unittest.TestCase):
                     last_post_days INTEGER, ai_score INTEGER DEFAULT 0,
                     ai_priority TEXT DEFAULT '', ai_reason TEXT DEFAULT ''
                 );
+                INSERT INTO tasks(id,niche,city,count,status,created_at) VALUES(1,'dentist','Kyiv',10,'done','2026-01-01T00:00:00Z');
                 INSERT INTO businesses(task_id,name,city) VALUES(1,'Legacy','Kyiv');
             """)
             conn.commit()
@@ -69,6 +70,8 @@ class DatabaseWebsiteResolutionTests(unittest.TestCase):
         rows = db.get_businesses(1)
         self.assertEqual(rows[0].name, "Legacy")
         self.assertEqual(rows[0].website_resolution_status, "")
+        self.assertEqual(rows[0].search_mode, "WEBSITE_NEED")
+        self.assertEqual(db.get_task(1)["search_mode"], "WEBSITE_NEED")
 
     def test_save_update_and_unicode_evidence_round_trip(self):
         db.init_db()

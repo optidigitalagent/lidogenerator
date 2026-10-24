@@ -129,3 +129,19 @@ authenticated same-origin API, and Opti calls this API server-to-server. Search
 tasks, structured progress, terminal state, idempotency, and the outbox remain in
 Lead Generator SQLite only. Opti does not mirror them. Completed leads still
 reach Opti exclusively through the existing Bridge and immutable outbox.
+
+## Company selection in Opti
+
+The Opti Lead Generator form defaults new searches to **Все компании** and can
+explicitly request **Без сайта/слабый сайт**. Selection mode is persisted on each
+search and its final businesses; existing searches keep their prior semantics.
+The new mode retains website audits and contacts but does not exclude good or
+uncertain websites. It also keeps real website URLs in CSV/XLSX and Bridge.
+The historical contactability policy still applies (production currently
+requires Instagram); no contact-quality requirement is relaxed.
+
+See [the control contract](contracts/opti-control-api-v0.md#per-search-selection-mode).
+Run provider-free regressions with `python -m unittest discover -s tests -p
+ 'test_*.py'`. `python scripts/export_all_companies_fixture.py` prints the
+four-company Bridge fixture consumed by Opti's local browser smoke. It makes no
+network calls and contains no real contacts.

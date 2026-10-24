@@ -161,6 +161,7 @@ def init_db() -> None:
 
 
 _BUSINESS_MIGRATIONS = {
+    "search_mode": "TEXT NOT NULL DEFAULT 'WEBSITE_NEED'",
     "category": "TEXT DEFAULT ''",
     "email": "TEXT DEFAULT ''",
     "google_maps_url": "TEXT DEFAULT ''",
@@ -198,6 +199,7 @@ def _migrate_tasks(conn: sqlite3.Connection) -> None:
     if "opti_sync_contract_version" not in existing:
         conn.execute("ALTER TABLE tasks ADD COLUMN opti_sync_contract_version TEXT")
     additions = {
+        "search_mode": "TEXT NOT NULL DEFAULT 'WEBSITE_NEED'",
         "initiated_via": "TEXT NOT NULL DEFAULT 'TELEGRAM'",
         "control_idempotency_key": "TEXT",
         "progress_json": "TEXT NOT NULL DEFAULT '{}'",
@@ -271,14 +273,17 @@ def create_task(
     *,
     initiated_via: str = "TELEGRAM",
     control_idempotency_key: str | None = None,
+    search_mode: str = "WEBSITE_NEED",
 ) -> int:
     """Создать задачу поиска, вернуть её id."""
+    from website_pipeline import SearchMode
+    search_mode = SearchMode(search_mode).value
     with _connect() as conn:
         cur = conn.execute(
             "INSERT INTO tasks (niche, city, count, status, chat_id, created_at, "
             "external_batch_id, opti_sync_contract_version, initiated_via, "
-            "control_idempotency_key, progress_json, updated_at) "
-            "VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?)",
+            "control_idempotency_key, progress_json, updated_at, search_mode) "
+            "VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 niche,
                 city,
@@ -291,6 +296,7 @@ def create_task(
                 control_idempotency_key,
                 json.dumps({"stage": "new", "targetLeads": count}),
                 _timestamp(),
+                search_mode,
             ),
         )
         return cur.lastrowid
@@ -441,6 +447,7 @@ def get_completed_tasks_for_opti_reconciliation(limit: int = 100) -> List[sqlite
 # ---------- Бизнесы ----------
 
 _BUSINESS_COLUMNS = (
+    "search_mode",
     "task_id", "name", "niche", "city", "phone", "address", "category", "email", "website",
     "instagram_url", "google_maps_url", "google_place_id", "external_candidate_id",
     "collected_at", "rating", "reviews_count", "has_site", "site_quality",

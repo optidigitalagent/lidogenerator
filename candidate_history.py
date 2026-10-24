@@ -415,6 +415,11 @@ def reconcile_city_alias_scopes(
         raise
 
 
+def scope_for_search_mode(base_scope: str, search_mode: str) -> str:
+    """Keep legacy website exclusions from vetoing all-company searches."""
+    return base_scope + ":all_companies:v1" if search_mode == "ALL_COMPANIES" else base_scope
+
+
 def backfill_persisted_leads(conn: sqlite3.Connection) -> int:
     rows = conn.execute(
         "SELECT businesses.*, tasks.niche AS task_niche, tasks.city AS task_city "
@@ -431,6 +436,7 @@ def backfill_persisted_leads(conn: sqlite3.Connection) -> int:
         scope = canonical_scope_key_from_resolved(
             niche_plan, city_definition, data["task_city"]
         )
+        scope = scope_for_search_mode(scope, data.get("search_mode", "WEBSITE_NEED"))
         canonical_city = (
             city_definition.canonical_name
             if city_definition is not None

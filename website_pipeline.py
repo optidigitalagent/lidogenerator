@@ -16,6 +16,11 @@ from website_resolution import (
 )
 
 
+class SearchMode(str, Enum):
+    ALL_COMPANIES = "ALL_COMPANIES"
+    WEBSITE_NEED = "WEBSITE_NEED"
+
+
 class ResolverMode(str, Enum):
     OFF = "off"
     SHADOW = "shadow"
@@ -146,6 +151,7 @@ def qualify_lead(
     has_actionable_contact: bool,
     resolution: WebsiteResolution,
     audit: WebsiteAuditResult,
+    search_mode: SearchMode = SearchMode.WEBSITE_NEED,
 ) -> LeadQualification:
     if type(has_actionable_contact) is not bool:
         raise TypeError("has_actionable_contact must be a bool")
@@ -153,8 +159,13 @@ def qualify_lead(
         raise TypeError("resolution must be a WebsiteResolution")
     if not isinstance(audit, WebsiteAuditResult):
         raise TypeError("audit must be a WebsiteAuditResult")
+    if not isinstance(search_mode, SearchMode):
+        raise TypeError("search_mode must be a SearchMode")
     if not has_actionable_contact:
         return LeadQualification(LeadDecision.NOT_LEAD, "contact_missing")
+
+    if search_mode is SearchMode.ALL_COMPANIES:
+        return LeadQualification(LeadDecision.LEAD, "all_companies_contact_available")
 
     if resolution.status is ResolutionStatus.FOUND_OFFICIAL:
         outcomes = {
