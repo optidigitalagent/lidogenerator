@@ -38,6 +38,11 @@ class _FeedPage:
     async def goto(self, url: str, **kwargs) -> None:
         self.url = url
 
+    async def wait_for_function(self, script: str, **kwargs):
+        handle = AsyncMock()
+        handle.json_value.return_value = {"kind": "feed"}
+        return handle
+
     def locator(self, selector: str):
         if selector == 'div[role="feed"]':
             return self.feed

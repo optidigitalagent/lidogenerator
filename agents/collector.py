@@ -14,8 +14,10 @@ from datetime import datetime, timezone
 from typing import AsyncIterator, Awaitable, Callable, List, Optional
 
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout, async_playwright
+from playwright.async_api import Error as PlaywrightError
 
 import config
+from contactability import normalize_email
 from discovery_session import MapsDiscoverySession, normalize_maps_place_url
 from models import Business
 
@@ -85,6 +87,21 @@ async def _extract_business(page: Page, url: str, niche: str, city: str) -> Opti
             b.phone = item_id.replace("phone:tel:", "").strip()
     except Exception:
         pass
+
+    # Keep an actual published email, without guessing addresses from company names.
+    try:
+        email_links = await page.eval_on_selector_all(
+            'a[href^="mailto:"]', "els => els.map(e => e.getAttribute('href'))"
+        )
+    except PlaywrightError:
+        email_links = []
+    for href in email_links:
+        if not isinstance(href, str):
+            continue
+        email = normalize_email(urllib.parse.unquote(href[7:].split("?", 1)[0]))
+        if email:
+            b.email = email
+            break
 
     # Адрес
     try:
@@ -158,6 +175,55 @@ def _maps_search_url(niche: str, city: str, query_text: str | None = None) -> st
     return f"https://www.google.com/maps/search/{query}?hl=uk"
 
 
+async def _wait_for_maps_result(
+    page: Page, stop_flag: Callable[[], bool] | None = None,
+) -> dict[str, str] | None:
+    """Wait within the existing 20s deadline for a feed or a ready place page."""
+    if stop_flag and stop_flag():
+        return None
+    waiter = asyncio.create_task(page.wait_for_function(
+        """() => {
+            const visible = (selector, requireText = false) =>
+                [...document.querySelectorAll(selector)]
+                .some(element => {
+                    const box = element.getBoundingClientRect();
+                    return box.width > 0 && box.height > 0 &&
+                        getComputedStyle(element).visibility === 'visible' &&
+                        (!requireText || (element.textContent || '').trim());
+                });
+            if (location.pathname.startsWith('/maps/place/') &&
+                visible('h1.DUwDvf', true)) {
+                return {kind: 'place', url: location.href};
+            }
+            if (visible('div[role="feed"]')) return {kind: 'feed'};
+            return false;
+        }""",
+        timeout=20000,
+    ))
+    try:
+        if stop_flag:
+            while not waiter.done():
+                if stop_flag():
+                    return None
+                # Readiness wakes immediately; the interval only bounds Stop latency.
+                await asyncio.wait({waiter}, timeout=0.1)
+        handle = await waiter
+        try:
+            if stop_flag and stop_flag():
+                return None
+            return await handle.json_value()
+        finally:
+            await handle.dispose()
+    except PlaywrightTimeout as error:
+        raise PlaywrightTimeout(
+            "Google Maps result state timed out after 20000ms: expected a visible "
+            "results feed or /maps/place/ with a visible business heading"
+        ) from error
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+
+
 async def collect_stream(
     niche: str,
     city: str,
@@ -213,14 +279,16 @@ async def collect_stream(
             await feed_page.goto(url, wait_until="domcontentloaded", timeout=45000)
             await _accept_consent(feed_page)
 
-            # Иногда Maps сразу открывает одну карточку вместо списка
-            if "/maps/place/" in feed_page.url:
-                if stop_flag and stop_flag():
-                    return
-                if not runtime_discovery_session.claim_link(feed_page.url):
+            result = await _wait_for_maps_result(feed_page, stop_flag)
+            if result is None:
+                return
+            # Maps may switch to a single place after DOMContentLoaded.
+            if result["kind"] == "place":
+                place_url = result["url"]
+                if not runtime_discovery_session.claim_link(place_url):
                     return
                 runtime_discovery_session.record_card_opened()
-                b = await _extract_business(card_page, feed_page.url, niche, city)
+                b = await _extract_business(card_page, place_url, niche, city)
                 visited += 1
                 if progress_callback:
                     await progress_callback(visited)
@@ -229,7 +297,6 @@ async def collect_stream(
                 return
 
             feed = feed_page.locator('div[role="feed"]')
-            await feed.wait_for(state="visible", timeout=20000)
 
             stale_rounds = 0
             batch: List[Business] = []

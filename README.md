@@ -137,8 +137,13 @@ explicitly request **Без сайта/слабый сайт**. Selection mode i
 search and its final businesses; existing searches keep their prior semantics.
 The new mode retains website audits and contacts but does not exclude good or
 uncertain websites. It also keeps real website URLs in CSV/XLSX and Bridge.
-The historical contactability policy still applies (production currently
-requires Instagram); no contact-quality requirement is relaxed.
+Owner-approved selection update (2026-10-26): ALL_COMPANIES includes phone-only,
+email-only and companies with no public contact. Missing contacts are kept empty
+and labelled in Opti, never fabricated. The historical contact and website policy
+still applies to WEBSITE_NEED. New ALL_COMPANIES history uses a v2 scope so prior
+Instagram-only exclusions do not veto newly eligible businesses; prior history and
+stable external identities are preserved. Small all-company searches begin
+qualification at the requested batch size (target=1 means one card).
 
 See [the control contract](contracts/opti-control-api-v0.md#per-search-selection-mode).
 Run provider-free regressions with `python -m unittest discover -s tests -p

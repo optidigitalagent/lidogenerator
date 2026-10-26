@@ -161,11 +161,11 @@ def qualify_lead(
         raise TypeError("audit must be a WebsiteAuditResult")
     if not isinstance(search_mode, SearchMode):
         raise TypeError("search_mode must be a SearchMode")
+    if search_mode is SearchMode.ALL_COMPANIES:
+        return LeadQualification(LeadDecision.LEAD, "all_companies")
+
     if not has_actionable_contact:
         return LeadQualification(LeadDecision.NOT_LEAD, "contact_missing")
-
-    if search_mode is SearchMode.ALL_COMPANIES:
-        return LeadQualification(LeadDecision.LEAD, "all_companies_contact_available")
 
     if resolution.status is ResolutionStatus.FOUND_OFFICIAL:
         outcomes = {

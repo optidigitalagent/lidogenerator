@@ -115,11 +115,9 @@ class Business:
     def is_lead(self) -> bool:
         """Apply per-search website selection and the existing contact policy."""
         if self.search_mode == SearchMode.ALL_COMPANIES.value:
-            if config.LEAD_WEBSITE_POLICY == "verified_no_site_only":
-                return self.contactability.instagram_available
-            if config.LEAD_CONTACTABILITY_MODE == "instagram_only":
-                return bool(self.instagram_url)
-            return self.has_actionable_contact
+            # Discovery keeps public companies even if no contact was published.
+            # WEBSITE_NEED retains the historical contact/website requirements.
+            return True
         if config.LEAD_WEBSITE_POLICY == "verified_no_site_only":
             from website_presence import classify_website_presence_url
 
