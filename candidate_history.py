@@ -417,7 +417,8 @@ def reconcile_city_alias_scopes(
 
 def scope_for_search_mode(base_scope: str, search_mode: str) -> str:
     """Keep legacy website exclusions from vetoing all-company searches."""
-    return base_scope + ":all_companies:v1" if search_mode == "ALL_COMPANIES" else base_scope
+    # v1 exclusions required Instagram; do not reuse those vetoes for public contacts.
+    return base_scope + ":all_companies:v2" if search_mode == "ALL_COMPANIES" else base_scope
 
 
 def backfill_persisted_leads(conn: sqlite3.Connection) -> int:

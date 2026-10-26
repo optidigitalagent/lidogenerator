@@ -78,6 +78,8 @@ log = logging.getLogger("lead_hunter.orchestrator")
 
 
 def _qualification_contact_available(business: Business) -> bool:
+    if business.search_mode == SearchMode.ALL_COMPANIES.value:
+        return business.has_actionable_contact
     if config.LEAD_CONTACTABILITY_MODE == "instagram_only":
         return bool(business.instagram_url)
     return business.has_actionable_contact
@@ -124,12 +126,12 @@ def _contactability_qualification_telemetry(
             for contactability in candidate_contactability
         ),
         "good_site_excluded_count": sum(
-            business.has_actionable_contact
+            not business.is_lead and business.has_actionable_contact
             and business.website_status == "good website"
             for business in candidates
         ),
         "uncertain_site_excluded_count": sum(
-            business.has_actionable_contact
+            not business.is_lead and business.has_actionable_contact
             and (
                 business.website_status == "uncertain website"
                 or business.lead_decision == LeadDecision.UNCERTAIN.value
@@ -1106,6 +1108,9 @@ async def run_search(
                 stop_flag=stop_flag,
                 query_text=search_query.text,
                 discovery_session=maps_discovery_session,
+                # All-company candidates need no exclusion buffer. Start checking
+                # target=1 after one card, rather than opening fifteen first.
+                **({"batch_size": min(config.COLLECT_BATCH_SIZE, max(1, target_leads - len(leads)))} if all_companies else {}),
             ):
                 decision = _decide(remaining_queries=active_remaining_queries)
                 if decision.stop_reason is StopReason.USER_STOPPED:

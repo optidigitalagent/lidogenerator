@@ -33,9 +33,27 @@ class AllCompaniesTests(unittest.TestCase):
                         search_mode=SearchMode.ALL_COMPANIES,
                     )
                     self.assertEqual(
-                        LeadDecision.LEAD if contact else LeadDecision.NOT_LEAD,
+                        LeadDecision.LEAD,
                         result.decision,
                     )
+
+    def test_all_companies_includes_phone_email_and_honest_missing_contacts(self):
+        for website_policy in ["verified_no_site_only", "legacy_no_site_or_bad"]:
+            for mode in ["instagram_only", "multi_channel"]:
+                with (
+                    patch.object(config, "LEAD_WEBSITE_POLICY", website_policy),
+                    patch.object(config, "LEAD_CONTACTABILITY_MODE", mode),
+                ):
+                    for channels in [{"phone": "+380441234567"},
+                                     {"email": "office@public-business.ua"}, {}]:
+                        for quality in ["good", "none", "uncertain"]:
+                            item = Business(search_mode="ALL_COMPANIES",
+                                            site_quality=quality, **channels)
+                            self.assertTrue(item.is_lead)
+                            if not channels:
+                                self.assertFalse(item.has_actionable_contact)
+                                self.assertEqual(item.phone, "")
+                                self.assertEqual(item.email, "")
 
     def test_real_export_keeps_good_website_under_legacy_global_policy(self):
         item = Business(
@@ -90,6 +108,15 @@ class AllCompaniesTests(unittest.TestCase):
                     task_id=task_id,
                 )
             )
+            items.extend([
+                Business(name="Phone only", phone="+380441234567",
+                         google_place_id="phone-public", search_mode="ALL_COMPANIES",
+                         site_quality="good", website="https://good.example/", task_id=task_id),
+                Business(name="Email only", email="office@public-business.ua",
+                         google_place_id="email-public", search_mode="ALL_COMPANIES", task_id=task_id),
+                Business(name="No public contact", google_place_id="no-contact-public",
+                         search_mode="ALL_COMPANIES", task_id=task_id),
+            ])
             db.save_businesses(items)
             db.update_task_status(task_id, "done")
             db.init_db()
@@ -97,9 +124,12 @@ class AllCompaniesTests(unittest.TestCase):
             payload = build_payload(dict(db.get_task(task_id)), restored)
             self.assertEqual(
                 [lead["websiteAssessment"]["status"] for lead in payload["leads"]],
-                ["GOOD_SITE", "UNCERTAIN", "UNCERTAIN", "NO_SITE"],
+                ["GOOD_SITE", "UNCERTAIN", "UNCERTAIN", "NO_SITE", "GOOD_SITE", "UNCERTAIN", "UNCERTAIN"],
             )
-            self.assertEqual(len(payload["leads"]), 4)
+            self.assertEqual(len(payload["leads"]), 7)
+            self.assertEqual(payload["leads"][-3]["phone"], "+380441234567")
+            self.assertEqual(payload["leads"][-2]["email"], "office@public-business.ua")
+            self.assertTrue(all(payload["leads"][-1][k] is None for k in ["phone", "email", "instagramUrl"]))
             self.assertTrue(all(item.is_lead for item in restored))
             self.assertEqual(
                 stable_external_lead_id(items[0]), stable_external_lead_id(restored[0])

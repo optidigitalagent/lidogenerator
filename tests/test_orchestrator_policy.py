@@ -61,6 +61,7 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
             "summary": [],
         }
         collector_limits: list[int] = []
+        collector_batch_sizes: list[int | None] = []
         decisions = []
         statuses = Mock()
         opti_finalizations = []
@@ -78,6 +79,7 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
         ):
             nonlocal visited
             collector_limits.append(max_businesses)
+            collector_batch_sizes.append(kwargs.get("batch_size"))
             for batch in batches:
                 if stop_flag and stop_flag():
                     return
@@ -196,6 +198,7 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
             "checked_batches": checked_batches,
             "downstream": downstream,
             "collector_limits": collector_limits,
+            "collector_batch_sizes": collector_batch_sizes,
             "decisions": decisions,
             "statuses": statuses.call_args_list,
             "resolver_calls": resolver_calls,
@@ -203,7 +206,7 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
             "opti_finalizations": opti_finalizations,
         }
 
-    async def test_all_companies_preserves_contact_filter_dedup_and_site_states(self):
+    async def test_all_companies_preserves_public_contacts_dedup_and_site_states(self):
         good = _good_site("good")
         good.google_place_id = "good-place"
         duplicate = _good_site("duplicate")
@@ -213,14 +216,25 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
         absent = _lead("absent")
         absent.website_presence_status = "absent_confirmed"
         with patch.object(orchestrator.config, "LEAD_WEBSITE_POLICY", "verified_no_site_only"):
-            run = await self._run(target=4, max_candidates=10,
+            run = await self._run(target=6, max_candidates=10,
                 search_mode="ALL_COMPANIES", resolver_mode="off",
-                batches=[[good, duplicate, unknown, absent, _no_instagram("none")]])
+                batches=[[good, duplicate, unknown, absent, _no_instagram("none"),
+                          Business(name="phone", phone="+380441234567"),
+                          Business(name="email", email="office@public-business.ua")]])
         saved = run["downstream"]["save"][0]
-        self.assertEqual([b.name for b in saved], ["good", "unknown", "absent"])
+        expected = ["good", "unknown", "absent", "none", "phone", "email"]
+        self.assertEqual([b.name for b in saved], expected)
         self.assertTrue(all(b.search_mode == "ALL_COMPANIES" for b in saved))
         self.assertEqual(len(run["opti_finalizations"]), 1)
-        self.assertEqual([b.name for b in run["downstream"]["csv"][0]], ["good", "unknown", "absent"])
+        self.assertEqual([b.name for b in run["downstream"]["csv"][0]], expected)
+
+    async def test_all_companies_checks_a_single_requested_card_without_instagram(self):
+        for contact in [{"phone": "+380441234567"}, {"email": "office@public-business.ua"}, {}]:
+            with self.subTest(contact=contact), patch.object(orchestrator.config, "LEAD_WEBSITE_POLICY", "verified_no_site_only"):
+                run = await self._run(target=1, max_candidates=10, search_mode="ALL_COMPANIES", resolver_mode="strict", batches=[[Business(name="Public business", site_quality="good", **contact)]])
+                self.assertEqual(run["collector_batch_sizes"], [1])
+                self.assertEqual(len(run["downstream"]["save"][0]), 1)
+                self.assertEqual(len(run["opti_finalizations"]), 1)
 
     async def test_resolver_mode_off_skips_resolver(self) -> None:
         run = await self._run(

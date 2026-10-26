@@ -24,10 +24,11 @@ class CollectorNavigationBrowserSmoke(unittest.IsolatedAsyncioTestCase):
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(headless=True)
         self.context = await self.browser.new_context()
+        self.extra_markup = ""
 
         async def fixture(route):
             body = HEADING if "/maps/place/" in route.request.url else "Loading"
-            await route.fulfill(content_type="text/html", body=body)
+            await route.fulfill(content_type="text/html", body=body + self.extra_markup)
 
         # Every browser request is fulfilled locally, including document navigation.
         await self.context.route("**/*", fixture)
@@ -78,6 +79,20 @@ class CollectorNavigationBrowserSmoke(unittest.IsolatedAsyncioTestCase):
             await collector._wait_for_maps_result(self.page),
             {"kind": "place", "url": PLACE},
         )
+
+    async def test_extraction_keeps_real_published_contacts_and_search_parameters(self):
+        self.extra_markup = '''
+            <button data-item-id="phone:tel:+380441234567">Call</button>
+            <a href="mailto:office@public-business.ua?subject=Hello">Email</a>
+            <a data-item-id="authority" href="https://public-business.ua/">Website</a>
+            <a href="https://instagram.com/public_business/">Instagram</a>
+        '''
+        business = await collector._extract_business(self.page, PLACE, "Hotel", "Kyiv")
+        self.assertEqual(business.phone, "+380441234567")
+        self.assertEqual(business.email, "office@public-business.ua")
+        self.assertEqual(business.website, "https://public-business.ua/")
+        self.assertEqual(business.instagram_url, "https://instagram.com/public_business/")
+        self.assertEqual((business.niche, business.city), ("Hotel", "Kyiv"))
 
     async def test_normal_feed(self):
         pending = await self._pending_result()

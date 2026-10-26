@@ -14,8 +14,10 @@ from datetime import datetime, timezone
 from typing import AsyncIterator, Awaitable, Callable, List, Optional
 
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout, async_playwright
+from playwright.async_api import Error as PlaywrightError
 
 import config
+from contactability import normalize_email
 from discovery_session import MapsDiscoverySession, normalize_maps_place_url
 from models import Business
 
@@ -85,6 +87,21 @@ async def _extract_business(page: Page, url: str, niche: str, city: str) -> Opti
             b.phone = item_id.replace("phone:tel:", "").strip()
     except Exception:
         pass
+
+    # Keep an actual published email, without guessing addresses from company names.
+    try:
+        email_links = await page.eval_on_selector_all(
+            'a[href^="mailto:"]', "els => els.map(e => e.getAttribute('href'))"
+        )
+    except PlaywrightError:
+        email_links = []
+    for href in email_links:
+        if not isinstance(href, str):
+            continue
+        email = normalize_email(urllib.parse.unquote(href[7:].split("?", 1)[0]))
+        if email:
+            b.email = email
+            break
 
     # Адрес
     try:
