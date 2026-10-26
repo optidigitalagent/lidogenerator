@@ -59,6 +59,24 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
     def auth(self):
         return {"Authorization": f"Bearer {TOKEN}"}
 
+    async def test_mode_is_durable_per_job_and_part_of_idempotency(self):
+        path = "/internal/opti/v1/searches"
+        headers = {**self.auth(), "Idempotency-Key": "mode-test"}
+        payload = {"niche": "dentistry", "city": "Kyiv", "targetLeads": 1}
+        response = await self.client.post(path, headers=headers, json=payload)
+        dto = await response.json()
+        self.assertEqual(201, response.status)
+        self.assertEqual("ALL_COMPANIES", dto["searchMode"])
+        self.assertEqual("ALL_COMPANIES", db.get_task_by_search_id(dto["searchId"])["search_mode"])
+        replay = await self.client.post(path, headers=headers, json={**payload, "searchMode": "ALL_COMPANIES"})
+        self.assertEqual(200, replay.status)
+        conflict = await self.client.post(path, headers=headers, json={**payload, "searchMode": "WEBSITE_NEED"})
+        self.assertEqual(409, conflict.status)
+        old = db.create_task("old", "Kyiv", 1)
+        self.assertEqual("WEBSITE_NEED", search_dto(dict(db.get_task(old)))["searchMode"])
+        invalid = await self.client.post(path, headers={**self.auth(), "Idempotency-Key": "invalid-mode"}, json={**payload, "searchMode": "INVALID"})
+        self.assertEqual(400, invalid.status)
+
     async def test_health_public_and_bearer_auth(self):
         response = await self.client.get("/health")
         self.assertEqual(200, response.status)

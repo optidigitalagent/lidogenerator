@@ -52,7 +52,9 @@ from rendered_site_audit import (
     audit_rendered_sites_shadow,
 )
 from website_candidate_matching import SearchProvider
-from website_pipeline import LeadDecision, ResolverMode, parse_resolver_mode, qualify_lead
+from website_pipeline import (
+    LeadDecision, ResolverMode, SearchMode, parse_resolver_mode, qualify_lead,
+)
 from website_search_runtime import (
     build_configured_search_provider,
     openai_web_search_telemetry_snapshot,
@@ -669,7 +671,12 @@ async def run_search(
     interval = progress_interval if progress_interval is not None else config.PROGRESS_INTERVAL
     progress = _Progress(progress_callback, interval, stop_event)
     resolver_mode = parse_resolver_mode(config.WEBSITE_RESOLVER_MODE)
-    verified_no_site = config.LEAD_WEBSITE_POLICY == "verified_no_site_only"
+    search_mode = SearchMode(dict(task).get("search_mode", "WEBSITE_NEED"))
+    all_companies = search_mode is SearchMode.ALL_COMPANIES
+    verified_no_site = (
+        not all_companies
+        and config.LEAD_WEBSITE_POLICY == "verified_no_site_only"
+    )
     if website_search_provider is not None:
         runtime_website_search_provider = website_search_provider
     elif resolver_mode is ResolverMode.OFF:
@@ -723,6 +730,7 @@ async def run_search(
     retryable_claim_releases = 0
     stop_reason: Optional[StopReason] = None
     seen_business_keys: set[tuple[str, ...]] = set()
+    seen_source_keys: set[tuple[str, str]] = set()
     deep_discovery_enabled = config.DEEP_DISCOVERY_MODE == "apply"
     maps_discovery_session = MapsDiscoverySession(
         dedupe_enabled=deep_discovery_enabled,
@@ -743,6 +751,10 @@ async def run_search(
     )
     history_scope = candidate_history.canonical_scope_key_from_resolved(
         niche_plan, city_definition, city
+    )
+    # Website exclusions from older searches must not veto the new selection mode.
+    history_scope = candidate_history.scope_for_search_mode(
+        history_scope, search_mode.value
     )
     claimed_history_keys: dict[int, str] = {}
 
@@ -1101,11 +1113,21 @@ async def run_search(
 
                 unique_batch: List[Business] = []
                 for business in batch:
+                    business.search_mode = search_mode.value
                     key = _business_dedupe_key(business)
-                    if key is not None and key in seen_business_keys:
+                    source_keys = {
+                        (kind, value.strip()) for kind, value in (
+                            ("candidate", business.external_candidate_id),
+                            ("place", business.google_place_id),
+                        ) if value.strip()
+                    }
+                    if source_keys & seen_source_keys or (
+                        key is not None and key in seen_business_keys
+                    ):
                         continue
                     if key is not None:
                         seen_business_keys.add(key)
+                    seen_source_keys.update(source_keys)
                     unique_batch.append(business)
 
                 if unique_batch:
@@ -1223,6 +1245,7 @@ async def run_search(
                                 ),
                                 resolution=website_resolver.resolution_from_business(business),
                                 audit=website_resolver.audit_from_business(business),
+                                search_mode=search_mode,
                             )
                             business.lead_decision = qualification.decision.value
                             business.lead_decision_reason = qualification.reason

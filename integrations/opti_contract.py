@@ -237,6 +237,13 @@ def _website_assessment(business: Business, checked_at: str) -> dict[str, Any]:
         "technical_error": "UNCERTAIN",
         "unknown": "NOT_CHECKED",
     }[quality]
+    if (
+        business.search_mode == "ALL_COMPANIES"
+        and status == "NO_SITE"
+        and business.website_presence_status != "absent_confirmed"
+    ):
+        status = "UNCERTAIN"
+        quality = "uncertain"
     return {
         "status": status,
         "hasSite": bool(business.has_site),

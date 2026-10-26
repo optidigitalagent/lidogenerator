@@ -29,15 +29,17 @@ def _reportable_leads(businesses: List[Business]) -> List[Business]:
         leads = [
             business
             for business in leads
-            if business.website_presence_status == "absent_confirmed"
-            and not business.website_presence_resolved_url
-            and not classify_website_presence_url(business.website)
+            if business.search_mode == "ALL_COMPANIES" or (
+                business.website_presence_status == "absent_confirmed"
+                and not business.website_presence_resolved_url
+                and not classify_website_presence_url(business.website)
+            )
         ]
     return leads
 
 
 def _reported_website_url(business: Business) -> str:
-    if config.LEAD_WEBSITE_POLICY == "verified_no_site_only":
+    if config.LEAD_WEBSITE_POLICY == "verified_no_site_only" and business.search_mode != "ALL_COMPANIES":
         return ""
     return business.effective_website_url
 
@@ -192,7 +194,7 @@ def format_leads_summary(businesses: List[Business], limit: int = 20) -> str:
         website_line = (
             f"\nWebsite: {business.effective_website_url}"
             if business.effective_website_url
-            and config.LEAD_WEBSITE_POLICY != "verified_no_site_only"
+            and (config.LEAD_WEBSITE_POLICY != "verified_no_site_only" or business.search_mode == "ALL_COMPANIES")
             else ""
         )
         blocks.append(

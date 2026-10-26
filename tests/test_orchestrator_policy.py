@@ -39,6 +39,7 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
         self,
         *,
         target: int,
+        search_mode: str = "WEBSITE_NEED",
         max_candidates: int,
         batches: list[list[Business]],
         stop_event: asyncio.Event | None = None,
@@ -144,7 +145,7 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
             decisions.append((progress, decision))
             return decision
 
-        task = {"niche": "test", "city": "test", "count": target}
+        task = {"niche": "test", "city": "test", "count": target, "search_mode": search_mode}
         with (
             patch.object(
                 orchestrator.config,
@@ -201,6 +202,25 @@ class OrchestratorPolicyTests(unittest.IsolatedAsyncioTestCase):
             "events": events,
             "opti_finalizations": opti_finalizations,
         }
+
+    async def test_all_companies_preserves_contact_filter_dedup_and_site_states(self):
+        good = _good_site("good")
+        good.google_place_id = "good-place"
+        duplicate = _good_site("duplicate")
+        duplicate.google_place_id = "good-place"
+        unknown = _lead("unknown")
+        unknown.site_quality = "uncertain"
+        absent = _lead("absent")
+        absent.website_presence_status = "absent_confirmed"
+        with patch.object(orchestrator.config, "LEAD_WEBSITE_POLICY", "verified_no_site_only"):
+            run = await self._run(target=4, max_candidates=10,
+                search_mode="ALL_COMPANIES", resolver_mode="off",
+                batches=[[good, duplicate, unknown, absent, _no_instagram("none")]])
+        saved = run["downstream"]["save"][0]
+        self.assertEqual([b.name for b in saved], ["good", "unknown", "absent"])
+        self.assertTrue(all(b.search_mode == "ALL_COMPANIES" for b in saved))
+        self.assertEqual(len(run["opti_finalizations"]), 1)
+        self.assertEqual([b.name for b in run["downstream"]["csv"][0]], ["good", "unknown", "absent"])
 
     async def test_resolver_mode_off_skips_resolver(self) -> None:
         run = await self._run(

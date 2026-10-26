@@ -6,7 +6,7 @@ from typing import Optional
 
 import config
 from contactability import Contactability, ContactChannel, contactability_from_business
-from website_pipeline import LeadDecision
+from website_pipeline import LeadDecision, SearchMode
 
 
 @dataclass
@@ -69,6 +69,7 @@ class Business:
     ai_reason: str = ""                 # объяснение оценки
 
     # --- служебное ---
+    search_mode: str = SearchMode.WEBSITE_NEED.value
     task_id: Optional[int] = None       # id задачи поиска
 
     @property
@@ -85,6 +86,11 @@ class Business:
         if self.site_quality == "bad":
             return "bad website"
         if self.site_quality in {"uncertain", "technical_error"}:
+            return "uncertain website"
+        if (
+            self.search_mode == SearchMode.ALL_COMPANIES.value
+            and self.website_presence_status != "absent_confirmed"
+        ):
             return "uncertain website"
         return "no website"
 
@@ -107,7 +113,13 @@ class Business:
 
     @property
     def is_lead(self) -> bool:
-        """Require website need and the contact allowed by the active mode."""
+        """Apply per-search website selection and the existing contact policy."""
+        if self.search_mode == SearchMode.ALL_COMPANIES.value:
+            if config.LEAD_WEBSITE_POLICY == "verified_no_site_only":
+                return self.contactability.instagram_available
+            if config.LEAD_CONTACTABILITY_MODE == "instagram_only":
+                return bool(self.instagram_url)
+            return self.has_actionable_contact
         if config.LEAD_WEBSITE_POLICY == "verified_no_site_only":
             from website_presence import classify_website_presence_url
 
