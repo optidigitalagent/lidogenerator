@@ -103,6 +103,13 @@ def public_url(value: str) -> str:
                 raise ValueError
         elif "." not in p.hostname:
             raise ValueError
+        # Telegram content terms require consent this stateless reader does not have.
+        host = p.hostname.casefold().rstrip(".")
+        if any(
+            host == domain or host.endswith("." + domain)
+            for domain in ("t.me", "telegram.me", "telegram.org", "telegram.dog")
+        ):
+            raise SourceAdapterError("SOURCE_POLICY_RESTRICTED", 403)
         return value.split("#", 1)[0]
     except (ValueError, TypeError, AttributeError):
         raise SourceAdapterError("UNSAFE_URL", 422) from None

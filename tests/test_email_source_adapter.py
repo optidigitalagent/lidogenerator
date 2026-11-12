@@ -39,6 +39,17 @@ class EmailSafety(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(SourceAdapterError):
                 public_url(value)
 
+    def test_source_terms_refused_before_network_including_aliases(self):
+        for host in ("t.me", "www.telegram.me", "telegram.org", "a.telegram.dog"):
+            with self.assertRaises(SourceAdapterError) as error:
+                public_url("https://" + host + "/s/business")
+            self.assertEqual("SOURCE_POLICY_RESTRICTED", error.exception.code)
+            self.assertEqual(403, error.exception.status)
+        self.assertEqual(
+            "https://telegram.org.example.test/",
+            public_url("https://telegram.org.example.test/"),
+        )
+
     def test_queries_do_not_mix_all_identity_fields(self):
         body = {
             "name": "Business",
