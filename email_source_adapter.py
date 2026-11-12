@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import math
 import re
 import socket
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urljoin, urlsplit
 
@@ -29,11 +32,30 @@ SUPPORTED_MODES = {"NAME_CITY", "PHONE_CITY", "NAME_ADDRESS", "KNOWN_DOMAIN"}
 
 
 class SourceAdapterError(Exception):
-    def __init__(self, code: str, status: int = 503, details=None) -> None:
+    def __init__(
+        self, code: str, status: int = 503, details=None, retry_after=None
+    ) -> None:
         self.code = code
         self.status = status
         self.details = details or {}
+        self.retry_after = retry_after
         super().__init__(code)
+
+
+def provider_retry_after(error):
+    response = getattr(error, "response", None)
+    value = response.headers.get("retry-after") if response is not None else None
+    if not value or len(value) > 100:
+        return None
+    try:
+        seconds = (
+            int(value)
+            if value.isascii() and value.isdigit()
+            else (parsedate_to_datetime(value) - datetime.now(UTC)).total_seconds()
+        )
+        return str(max(0, min(86400, math.ceil(seconds))))
+    except (ValueError, TypeError, OverflowError):
+        return None
 
 
 def public_ip(value: str) -> bool:
@@ -254,7 +276,9 @@ async def search_sources(body: dict):
         if status in {401, 403}:
             raise SourceAdapterError("SOURCE_PROVIDER_AUTH") from None
         if status == 429:
-            raise SourceAdapterError("SOURCE_PROVIDER_QUOTA") from None
+            raise SourceAdapterError(
+                "SOURCE_PROVIDER_QUOTA", retry_after=provider_retry_after(error)
+            ) from None
         if "Timeout" in name:
             raise SourceAdapterError("SOURCE_PROVIDER_TIMEOUT") from None
         raise SourceAdapterError("SOURCE_PROVIDER_ERROR") from None
@@ -719,7 +743,11 @@ class EmailSourceAdapter:
             return web.json_response({"error": {"code": "RENDER_DEADLINE"}}, status=503)
         except SourceAdapterError as error:
             return web.json_response(
-                {"error": {"code": error.code, **error.details}}, status=error.status
+                {"error": {"code": error.code, **error.details}},
+                status=error.status,
+                headers={"Retry-After": error.retry_after}
+                if error.retry_after is not None
+                else None,
             )
         except Exception:  # noqa: BLE001 - HTTP boundary: never disclose provider/page exceptions.
             return web.json_response(

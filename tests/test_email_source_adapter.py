@@ -354,3 +354,67 @@ class ProtectedSourceRoutes(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(200, response.status)
         finally:
             await client.close()
+
+
+class ProviderRetryAfter(unittest.IsolatedAsyncioTestCase):
+    async def test_sdk_quota_keeps_bounded_retry_after_and_http_adapter_forwards_it(
+        self,
+    ):
+        import httpx
+        from openai import RateLimitError
+
+        from email_source_adapter import provider_retry_after, search_sources
+
+        error = RateLimitError(
+            "fixture",
+            response=httpx.Response(
+                429,
+                headers={"retry-after": "120"},
+                request=httpx.Request("POST", "https://api.example.test/"),
+            ),
+            body=None,
+        )
+        client = AsyncMock()
+        client.__aenter__.return_value = client
+        client.responses.create.side_effect = error
+        with (
+            patch("config.WEBSITE_SEARCH_PROVIDER", "openai"),
+            patch("config.OPENAI_API_KEY", "fixture"),
+            patch("openai.AsyncOpenAI", return_value=client),
+            self.assertRaises(SourceAdapterError) as caught,
+        ):
+            await search_sources(
+                {"name": "Business", "city": "Київ", "mode": "NAME_CITY"}
+            )
+        self.assertEqual("120", caught.exception.retry_after)
+        self.assertEqual("SOURCE_PROVIDER_QUOTA", caught.exception.code)
+        error.response.headers["retry-after"] = "invalid"
+        self.assertIsNone(provider_retry_after(error))
+        error.response.headers["retry-after"] = "999999999"
+        self.assertEqual("86400", provider_retry_after(error))
+
+        class Runtime:
+            active_count = 0
+
+        adapter = EmailSourceAdapter(Runtime())
+        app = web.Application()
+
+        async def call(request):
+            return await adapter.handle(request, "search")
+
+        app.router.add_post("/search", call)
+        api = TestClient(TestServer(app))
+        await api.start_server()
+        try:
+            with patch(
+                "email_source_adapter.search_sources",
+                new=AsyncMock(side_effect=caught.exception),
+            ):
+                response = await api.post(
+                    "/search",
+                    json={"operationKey": "00000000-0000-4000-8000-000000000002"},
+                )
+                self.assertEqual(503, response.status)
+                self.assertEqual("120", response.headers.get("Retry-After"))
+        finally:
+            await api.close()
