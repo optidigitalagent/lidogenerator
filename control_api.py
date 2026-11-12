@@ -13,6 +13,7 @@ from aiohttp import ContentTypeError, web
 
 import config
 import db
+from email_source_adapter import EmailSourceAdapter
 from integrations import opti_outbox
 from search_runtime import SearchRuntime
 from website_pipeline import SearchMode
@@ -333,9 +334,19 @@ def create_app(runtime: SearchRuntime, token: str) -> web.Application:
     )
     app[CONTROL_TOKEN_KEY] = token
     app[RUNTIME_KEY] = runtime
+    email_tools = EmailSourceAdapter(runtime)
+
+    async def email_search(request):
+        return await email_tools.handle(request, "search")
+
+    async def email_render(request):
+        return await email_tools.handle(request, "render")
+
     app.add_routes(
         [
             web.get("/health", health),
+            web.post(f"{PREFIX}/email-sources/search", email_search),
+            web.post(f"{PREFIX}/email-sources/render", email_render),
             web.get(f"{PREFIX}/searches", list_searches),
             web.post(f"{PREFIX}/searches", create_search),
             web.get(f"{PREFIX}/searches/{{search_id}}", get_search),
