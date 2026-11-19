@@ -1,3 +1,5 @@
+> Historical checkpoint: superseded by independent FLOW08 audit and [FRONTIER09](EMAIL_FRONTIER_09.md).
+
 # OPTI-EMAIL-FLOW-08 — final checkpoint
 
 User-approved coordinated continuation of Opti PR41 and Generator draft PR36.
