@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import parse_qsl, quote, unquote, urljoin, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, unquote_plus, urljoin, urlsplit
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, web
 from aiohttp.abc import AbstractResolver
@@ -29,7 +29,8 @@ MAX_BODY = 1024 * 1024
 MAX_RENDER_BYTES = 4 * 1024 * 1024
 MAX_RENDER_REQUESTS = 40
 SUPPORTED_MODES = {"NAME_CITY", "PHONE_CITY", "NAME_ADDRESS", "KNOWN_DOMAIN"}
-# SDK22s is an I/O timeout. Bound the entire operation before Opti's28s abort.
+# SDK22s is an I/O timeout. The26s active-operation guard starts AFTER the
+# semaphore; queue wait is excluded. Opti independently aborts its caller at28s.
 SEARCH_TOTAL_DEADLINE = 26
 
 
@@ -254,6 +255,37 @@ def query_text(body: dict) -> str:
     return f'"{name}" {city} email контакти'
 
 
+def source_url_key(value: str) -> str:
+    """Validated traversal key only; the original URL remains fetch/provenance.
+
+    Remove only exact decoded utm_source=openai components. Preserve every
+    remaining query byte, order, repeated/empty component and functional value.
+    Invalid percent escapes or UTF-8 never match the removable pair.
+    """
+    value = public_url(value)
+    base, marker, query = value.partition("?")
+    if not marker:
+        return value
+
+    def tracking(component):
+        name, separator, content = component.partition("=")
+        if not separator or re.search(r"%(?![0-9A-Fa-f]{2})", component):
+            return False
+        try:
+            return (
+                unquote_plus(name, errors="strict") == "utm_source"
+                and unquote_plus(content, errors="strict") == "openai"
+            )
+        except UnicodeError:
+            return False
+
+    components = query.split("&")
+    kept = [component for component in components if not tracking(component)]
+    if len(kept) == len(components):
+        return value
+    return base + ("?" + "&".join(kept) if kept else "")
+
+
 def select_search_sources(raw: dict):
     """Citations first, then consulted sources, within the existing eight slots.
 
@@ -278,8 +310,13 @@ def select_search_sources(raw: dict):
         if isinstance(value, str):
             try:
                 title = candidate.get("title")
+                url = public_url(value)
                 target.setdefault(
-                    public_url(value), title[:300] if isinstance(title, str) else ""
+                    source_url_key(url),
+                    {
+                        "url": url,
+                        "title": title[:300] if isinstance(title, str) else "",
+                    },
                 )
             except SourceAdapterError:
                 pass
@@ -299,9 +336,9 @@ def select_search_sources(raw: dict):
                     add(cited, annotation)
     for source in (web_calls[0].get("action") or {}).get("sources", []):
         add(consulted, source)
-    for url, title in consulted.items():
-        cited.setdefault(url, title)
-    return [{"url": url, "title": title} for url, title in list(cited.items())[:8]]
+    for key, source in consulted.items():
+        cited.setdefault(key, source)
+    return list(cited.values())[:8]
 
 
 async def search_sources(body: dict, *, observation=None):
@@ -720,6 +757,8 @@ async def render_source(body: dict):
 class SearchOperation:
     task: asyncio.Task
     waiters: int = 0
+    state: str = "running"
+    was_cancelled: bool = False
 
 
 class EmailSourceAdapter:
@@ -741,6 +780,11 @@ class EmailSourceAdapter:
                 self.cache.popitem(last=False)
             return data
 
+    def _search_completed(self, key, operation):
+        operation.state = "completed"
+        if operation.waiters == 0 and self.inflight.get(key) is operation:
+            self.inflight.pop(key, None)
+
     async def _wait_for_search(self, request, key, body):
         if key in self.cache:
             return self.cache[key]
@@ -748,23 +792,41 @@ class EmailSourceAdapter:
         if operation is None:
             operation = SearchOperation(asyncio.create_task(self._search(key, body)))
             self.inflight[key] = operation
+            operation.task.add_done_callback(
+                lambda _task: self._search_completed(key, operation)
+            )
         operation.waiters += 1
         try:
+            if operation.state == "cancelling" or operation.was_cancelled:
+                # Observe at most one existing polling interval of cleanup. A
+                # healthy late caller receives HTTP503, never task cancellation
+                # or a new provider search. The original drainer retains the key.
+                await asyncio.wait([operation.task], timeout=0.1)
+                raise SourceAdapterError("SOURCE_OPERATION_CANCELLED", 503)
             while not operation.task.done():
                 transport = request.transport
                 if transport is None or transport.is_closing():
                     raise asyncio.CancelledError
                 # asyncio.wait does not cancel the shared task if this waiter leaves.
                 await asyncio.wait([operation.task], timeout=0.1)
+            if operation.was_cancelled or operation.task.cancelled():
+                raise SourceAdapterError("SOURCE_OPERATION_CANCELLED", 503)
             return operation.task.result()
         finally:
             operation.waiters -= 1
             if operation.waiters == 0:
-                if not operation.task.done():
+                if not operation.task.done() and operation.state == "running":
+                    operation.state = "cancelling"
+                    operation.was_cancelled = True
                     operation.task.cancel()
-                # Drain provider/client cleanup before releasing the operation key.
-                await asyncio.gather(operation.task, return_exceptions=True)
-                if operation.waiters == 0 and self.inflight.get(key) is operation:
+                    # Exactly one drainer cancels once and awaits provider/client
+                    # cleanup. A late waiter must not cancel that cleanup again.
+                    await asyncio.gather(operation.task, return_exceptions=True)
+                if (
+                    operation.task.done()
+                    and operation.waiters == 0
+                    and self.inflight.get(key) is operation
+                ):
                     self.inflight.pop(key, None)
 
     async def handle(self, request, kind):
