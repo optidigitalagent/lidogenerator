@@ -252,6 +252,56 @@ def query_text(body: dict) -> str:
     return f'"{name}" {city} email контакти'
 
 
+def select_search_sources(raw: dict):
+    """Citations first, then consulted sources, within the existing eight slots.
+
+    These are page candidates only. Publication, business/branch identity and
+    contact purpose still have to be verified by the consumer on the page.
+    """
+    if raw.get("status") != "completed":
+        raise SourceAdapterError("SOURCE_PROVIDER_INCOMPLETE_RESPONSE")
+    output = raw.get("output", [])
+    web_calls = [
+        item
+        for item in output
+        if item.get("type") == "web_search_call" and item.get("status") == "completed"
+    ]
+    # max_tool_calls can leave an unexecuted 'searching' item in the output.
+    if len(web_calls) != 1:
+        raise SourceAdapterError("SOURCE_PROVIDER_NO_COMPLETED_WEB_CALL")
+    cited, consulted = OrderedDict(), OrderedDict()
+
+    def add(target, candidate):
+        value = candidate.get("url")
+        if isinstance(value, str):
+            try:
+                title = candidate.get("title")
+                target.setdefault(
+                    public_url(value), title[:300] if isinstance(title, str) else ""
+                )
+            except SourceAdapterError:
+                pass
+
+    for item in output:
+        if (
+            item.get("type") != "message"
+            or item.get("status") != "completed"
+            or item.get("role") != "assistant"
+        ):
+            continue
+        for content in item.get("content", []):
+            if content.get("type") != "output_text":
+                continue
+            for annotation in content.get("annotations", []):
+                if annotation.get("type") == "url_citation":
+                    add(cited, annotation)
+    for source in (web_calls[0].get("action") or {}).get("sources", []):
+        add(consulted, source)
+    for url, title in consulted.items():
+        cited.setdefault(url, title)
+    return [{"url": url, "title": title} for url, title in list(cited.items())[:8]]
+
+
 async def search_sources(body: dict):
     query = query_text(body)
     if config.WEBSITE_SEARCH_PROVIDER != "openai" or not config.OPENAI_API_KEY:
@@ -289,43 +339,8 @@ async def search_sources(body: dict):
         if "Timeout" in name:
             raise SourceAdapterError("SOURCE_PROVIDER_TIMEOUT") from None
         raise SourceAdapterError("SOURCE_PROVIDER_ERROR") from None
-    candidates = OrderedDict()
-    raw = response.model_dump()
-    web_calls = [
-        item
-        for item in raw.get("output", [])
-        if item.get("type") == "web_search_call" and item.get("status") == "completed"
-    ]
-    # max_tool_calls can leave another unexecuted 'searching' item in the output.
-    # Count completed operations, and never consume the unfinished item's sources.
-    if len(web_calls) != 1:
-        raise SourceAdapterError("SOURCE_PROVIDER_NO_COMPLETED_WEB_CALL")
-    for item in raw.get("output", []):
-        for content in item.get("content", []):
-            for annotation in content.get("annotations", []):
-                if annotation.get("type") == "url_citation":
-                    value = annotation.get("url")
-                    if isinstance(value, str):
-                        try:
-                            candidates[public_url(value)] = annotation.get("title", "")[
-                                :300
-                            ]
-                        except SourceAdapterError:
-                            pass
-        action = (item.get("action") or {}) if item in web_calls else {}
-        for source in action.get("sources", []):
-            value = source.get("url")
-            if isinstance(value, str):
-                try:
-                    candidates.setdefault(
-                        public_url(value), str(source.get("title") or "")[:300]
-                    )
-                except SourceAdapterError:
-                    pass
     return {
-        "sources": [
-            {"url": key, "title": title} for key, title in list(candidates.items())[:8]
-        ],
+        "sources": select_search_sources(response.model_dump()),
         "usage": {
             "calls": 1,
             "inputTokens": getattr(response.usage, "input_tokens", 0),

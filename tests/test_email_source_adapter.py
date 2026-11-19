@@ -310,7 +310,7 @@ class ProviderCompletion(unittest.IsolatedAsyncioTestCase):
             },
         ]
         response = SimpleNamespace(
-            model_dump=lambda: {"output": output},
+            model_dump=lambda: {"status": "completed", "output": output},
             usage=SimpleNamespace(input_tokens=1, output_tokens=1),
         )
         client = AsyncMock()
