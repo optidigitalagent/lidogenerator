@@ -2,7 +2,7 @@
 
 Owner dispatched SOURCE10 on19-Nov-2026 to continue existing Opti PR41 and Generator PR36.
 Generator baseline fix/email-cited-source-selection atf5b77156f3c0578feba4492f1086fec906ade606
-is preserved; this task changes only this checkpoint in Generator. Prior accepted
+is preserved; this task changes this checkpoint and the required CI browser bootstrap in Generator; application code/settings remain unchanged. Prior accepted
 FRONTIER09 tracking selection/lifetime fixes remain unchanged and are not reimplemented.
 
 Opti now skips exact successfully processed native redirect destinations only after
@@ -44,3 +44,14 @@ in coordinated Opti docs/tasks/OPTI-EMAIL-SOURCE-10.md and docs/ai-context/PROJE
 One indexed sanitized ZIP with exact source fixtures/ledgers/reviews and verified owner
 Drive delivery; no secrets/CRM/backups. Further suitable-email evidence/Prevar UNKNOWN
 requires a separately approved scope; no action required from the owner for this result.
+
+## Required CI environment repair
+
+Final GitHub read showed both original f5b7715 and first SOURCE10 head5446f7c failing
+exactly the same2of945tests: Playwright Chromium executable absent in Ubuntu runner.
+R06 requires repository gates, so the minimal verification-environment repair installs
+Chromium/system dependencies using the already pinned Playwright1.64.1 before unchanged
+unit tests. No application/provider/browser-safety/retry/budget setting or test is changed;
+no local/production browser install, source capture or extra diagnostic provider call.
+The fresh final CI run/exit status is bound in result evidence; prior failed runs remain
+explicitly retained. This is test infrastructure, not a third product repair or release.
