@@ -294,9 +294,21 @@ def select_search_sources(raw: dict):
     These are page candidates only. Publication, business/branch identity and
     contact purpose still have to be verified by the consumer on the page.
     """
+    if not isinstance(raw, dict):
+        raise SourceAdapterError("SOURCE_PROVIDER_ERROR")
     if raw.get("status") != "completed":
         raise SourceAdapterError("SOURCE_PROVIDER_INCOMPLETE_RESPONSE")
-    output = raw.get("output", [])
+
+    def object_list(value):
+        if value is None:
+            return []
+        if not isinstance(value, list) or any(
+            not isinstance(item, dict) for item in value
+        ):
+            raise SourceAdapterError("SOURCE_PROVIDER_ERROR")
+        return value
+
+    output = object_list(raw.get("output"))
     web_calls = [
         item
         for item in output
@@ -330,13 +342,18 @@ def select_search_sources(raw: dict):
             or item.get("role") != "assistant"
         ):
             continue
-        for content in item.get("content", []):
+        for content in object_list(item.get("content")):
             if content.get("type") != "output_text":
                 continue
-            for annotation in content.get("annotations", []):
+            for annotation in object_list(content.get("annotations")):
                 if annotation.get("type") == "url_citation":
                     add(cited, annotation)
-    for source in (web_calls[0].get("action") or {}).get("sources", []):
+    action = web_calls[0].get("action")
+    if action is None:
+        action = {}
+    if not isinstance(action, dict):
+        raise SourceAdapterError("SOURCE_PROVIDER_ERROR")
+    for source in object_list(action.get("sources")):
         add(consulted, source)
     for key, source in consulted.items():
         cited.setdefault(key, source)
