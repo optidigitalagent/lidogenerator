@@ -41,6 +41,9 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
+      - name: Install Chromium for browser safety tests
+        run: python -m playwright install --with-deps chromium
+
       - name: Run unit tests
         run: python -m unittest discover -s tests -p "test_*.py" -v
 
