@@ -23,6 +23,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import async_playwright
 
 import config
+from email_provider_diagnostics import log_provider_error
 
 SOURCE_AGENT = "Opti-Public-Contacts/2.0"
 MAX_BODY = 1024 * 1024
@@ -394,6 +395,7 @@ async def search_sources(body: dict, *, observation=None):
             observation.cancelled = True
         raise
     except APIError as error:
+        log_provider_error(error, body.get("operationKey"))
         if observation is not None:
             observation.failure(error)
         name = type(error).__name__
