@@ -66,10 +66,30 @@ class SearchRuntime:
                     )
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                # The orchestrator persists a sanitized error snapshot. This boundary
-                # prevents an unobserved task exception from taking down either UI.
-                log.exception("Search task %s failed", task_id)
+            except Exception as error:  # noqa: BLE001 - final per-task runtime boundary
+                # Startup can fail before the orchestrator's own error boundary.
+                # Do not leave a finished coroutine advertised as a running job,
+                # overwrite a terminal/partial result, or expose provider secrets.
+                task = db.get_task(task_id)
+                if task is not None and task["status"] not in {
+                    "done",
+                    "error",
+                    "stopped",
+                }:
+                    if stop_event.is_set():
+                        db.update_task_progress(
+                            task_id, {"stage": "stopped", "stopReason": "USER_STOPPED"}
+                        )
+                        db.update_task_status(task_id, "stopped")
+                    else:
+                        db.update_task_progress(task_id, {"stage": "error"})
+                        db.update_task_status(
+                            task_id,
+                            "error",
+                            error_code="SEARCH_EXECUTION_FAILED",
+                            error_message="Search execution failed before completion",
+                        )
+                log.error("Search task %s failed (%s)", task_id, type(error).__name__)
             finally:
                 if completion_callback is not None:
                     try:

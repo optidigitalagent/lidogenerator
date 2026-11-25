@@ -25,6 +25,52 @@ class SearchRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.db_patch.stop()
         self.temp.cleanup()
 
+    async def test_unhandled_startup_error_is_terminal_and_other_jobs_continue(self):
+        runtime = SearchRuntime(3)
+        entered = set()
+        releases = {i: asyncio.Event() for i in range(4)}
+        ids = [
+            db.create_task(str(i), "Kyiv", 1, initiated_via="OPTI") for i in range(4)
+        ]
+
+        async def runner(task_id, *, progress_callback, stop_event):
+            index = ids.index(task_id)
+            entered.add(index)
+            db.update_task_status(task_id, "collecting")
+            await releases[index].wait()
+            if index == 0:
+                raise RuntimeError(
+                    "startup credential material must never reach the DTO"
+                )
+            db.update_task_status(task_id, "done")
+
+        for task_id in ids:
+            self.assertTrue(runtime.launch(task_id, run_search=runner))
+        for _ in range(20):
+            if len(entered) == 3:
+                break
+            await asyncio.sleep(0)
+        self.assertEqual({0, 1, 2}, entered)
+        self.assertEqual("new", db.get_task(ids[3])["status"])
+        releases[0].set()
+        for _ in range(30):
+            if 3 in entered:
+                break
+            await asyncio.sleep(0)
+        try:
+            self.assertEqual({0, 1, 2, 3}, entered)
+            failed = db.get_task(ids[0])
+            self.assertEqual("error", failed["status"])
+            self.assertEqual("SEARCH_EXECUTION_FAILED", failed["last_error_code"])
+            self.assertNotIn("credential", failed["last_error_message"])
+            self.assertIsNotNone(failed["finished_at"])
+            self.assertEqual("collecting", db.get_task(ids[1])["status"])
+        finally:
+            for event in releases.values():
+                event.set()
+            await runtime.shutdown()
+        self.assertTrue(all(db.get_task(i)["status"] == "done" for i in ids[1:]))
+
     async def test_queued_stop_is_immediate_and_engine_never_starts(self):
         runtime = SearchRuntime(1)
         running = 0
