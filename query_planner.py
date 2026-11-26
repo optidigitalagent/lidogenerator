@@ -14,6 +14,7 @@ class QueryKind(str, Enum):
     NICHE_VARIANT = "niche_variant"
     DISTRICT = "district"
     DISTRICT_VARIANT = "district_variant"
+    LOCAL_AREA = "local_area"
 
 
 def _normalize_non_empty_string(value: object, name: str) -> str:
@@ -96,8 +97,7 @@ class QueryQueue:
                 raise TypeError(f"queries[{index}] must be a SearchQuery")
         if type(self.next_index) is not int:
             raise TypeError(
-                "next_index must be an integer, "
-                f"not {type(self.next_index).__name__}"
+                f"next_index must be an integer, not {type(self.next_index).__name__}"
             )
         if self.next_index < 0:
             raise ValueError("next_index must be non-negative")
@@ -167,7 +167,9 @@ class QueryPlan:
 
 def _normalize_string_sequence(values: object, name: str) -> tuple[str, ...]:
     if isinstance(values, str) or not isinstance(values, Sequence):
-        raise TypeError(f"{name} must be a sequence of strings, not {type(values).__name__}")
+        raise TypeError(
+            f"{name} must be a sequence of strings, not {type(values).__name__}"
+        )
     return tuple(
         _normalize_non_empty_string(value, f"{name}[{index}]")
         for index, value in enumerate(values)
@@ -266,6 +268,7 @@ def build_query_plan(
     districts: Sequence[str] = (),
     fallback_variants: Sequence[str] = (),
     max_normal_queries: int | None = None,
+    local_areas: Sequence[str] = (),
 ) -> QueryPlan:
     """Build a stable broad phase plus primary-variant × district queries.
 
@@ -304,6 +307,19 @@ def build_query_plan(
             )
             if query.key in seen_keys:
                 continue
+            seen_keys.add(query.key)
+            deep_queries.append(query)
+
+    # One base-niche query per verified in-city area; no variant cross product.
+    # This runs only after the normal phase and shares its existing task budgets.
+    for area in _normalize_string_sequence(local_areas, "local_areas"):
+        query = SearchQuery(
+            text=f"{normalized_niche} {area} {normalized_city}",
+            niche=normalized_niche,
+            city=normalized_city,
+            kind=QueryKind.LOCAL_AREA,
+        )
+        if query.key not in seen_keys:
             seen_keys.add(query.key)
             deep_queries.append(query)
 

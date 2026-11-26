@@ -59,7 +59,9 @@ def _business(name: str) -> Business:
 
 
 class DeepDiscoveryHistoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_preopen_dedupe_and_durable_history_remain_authoritative(self) -> None:
+    async def test_preopen_dedupe_and_durable_history_remain_authoritative(
+        self,
+    ) -> None:
         durable_checked = {"1", "2"}
         active_claims: dict[str, int] = {}
         opened_by_task: dict[int, list[str]] = {1: [], 2: []}
@@ -96,7 +98,7 @@ class DeepDiscoveryHistoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             if batch:
                 yield batch
 
-        def claim_candidate(scope, key, basis, task_id):
+        def claim_candidate(scope, key, basis, task_id, **kwargs):
             if key in durable_checked:
                 return CandidateClaimResult.ALREADY_CHECKED
             owner = active_claims.get(key)
@@ -124,6 +126,18 @@ class DeepDiscoveryHistoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 active_claims.pop(key)
             return len(keys)
 
+        def persist_selected(items, *, history_scope, history_claims):
+            for business in items:
+                self.assertTrue(
+                    mark_checked(
+                        history_scope,
+                        history_claims[id(business)],
+                        current_task_id,
+                        "lead",
+                    )
+                )
+            return len(items)
+
         async def verify_presence(business, provider):
             provider_checks.append(business.name)
             return WebsitePresenceResult(
@@ -147,122 +161,168 @@ class DeepDiscoveryHistoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(
                 patch.object(orchestrator.config, "CANDIDATE_HISTORY_MODE", "apply")
             )
-            stack.enter_context(patch.object(
-                orchestrator.config,
-                "LEAD_WEBSITE_POLICY",
-                "verified_no_site_only",
-            ))
-            stack.enter_context(patch.object(
-                orchestrator.config,
-                "WEBSITE_PRESENCE_VERIFICATION_MODE",
-                "apply",
-            ))
+            stack.enter_context(
+                patch.object(
+                    orchestrator.config,
+                    "LEAD_WEBSITE_POLICY",
+                    "verified_no_site_only",
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.config,
+                    "WEBSITE_PRESENCE_VERIFICATION_MODE",
+                    "apply",
+                )
+            )
             stack.enter_context(
                 patch.object(orchestrator.config, "WEBSITE_RESOLVER_MODE", "off")
             )
-            stack.enter_context(patch.object(
-                orchestrator.config,
-                "LEAD_CONTACTABILITY_MODE",
-                "instagram_only",
-            ))
-            stack.enter_context(patch.object(
-                orchestrator.config,
-                "MAX_CHECKED_CANDIDATES_PER_TASK",
-                20,
-            ))
-            stack.enter_context(patch.object(
-                orchestrator.config,
-                "MAX_MAPS_CARDS_PER_TASK",
-                20,
-            ))
-            stack.enter_context(patch.object(
-                orchestrator.db,
-                "get_task",
-                side_effect=lambda task_id: {
-                    "niche": "dentistry",
-                    "city": "Kyiv",
-                    "count": 2,
-                },
-            ))
+            stack.enter_context(
+                patch.object(
+                    orchestrator.config,
+                    "LEAD_CONTACTABILITY_MODE",
+                    "instagram_only",
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.config,
+                    "MAX_CHECKED_CANDIDATES_PER_TASK",
+                    20,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.config,
+                    "MAX_MAPS_CARDS_PER_TASK",
+                    20,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.db,
+                    "get_task",
+                    side_effect=lambda task_id: {
+                        "niche": "dentistry",
+                        "city": "Kyiv",
+                        "count": 2,
+                    },
+                )
+            )
             stack.enter_context(patch.object(orchestrator.db, "update_task_status"))
-            stack.enter_context(patch.object(
-                orchestrator.db,
-                "update_task_progress",
-                new=record_progress,
-            ))
-            stack.enter_context(patch.object(orchestrator.db, "save_businesses"))
+            stack.enter_context(
+                patch.object(
+                    orchestrator.db,
+                    "update_task_progress",
+                    new=record_progress,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.db, "save_businesses", side_effect=persist_selected
+                )
+            )
             stack.enter_context(patch.object(orchestrator.db, "update_business"))
             stack.enter_context(
                 patch.object(orchestrator, "build_query_plan", return_value=PLAN)
             )
-            stack.enter_context(patch.object(
-                orchestrator.collector,
-                "collect_stream",
-                new=fake_collect_stream,
-            ))
-            stack.enter_context(patch.object(
-                orchestrator.candidate_history,
-                "canonical_scope_key_from_resolved",
-                return_value="dentistry:kyiv",
-            ))
-            stack.enter_context(patch.object(
-                orchestrator.candidate_history,
-                "candidate_fingerprint",
-                side_effect=lambda business, city: ("name", business.name),
-            ))
-            stack.enter_context(patch.object(
-                orchestrator.candidate_history,
-                "claim_candidate",
-                side_effect=claim_candidate,
-            ))
-            stack.enter_context(patch.object(
-                orchestrator.candidate_history,
-                "mark_candidate_checked",
-                side_effect=mark_checked,
-            ))
-            stack.enter_context(patch.object(
-                orchestrator.candidate_history,
-                "release_candidate_claim",
-                side_effect=release_claim,
-            ))
-            stack.enter_context(patch.object(
-                orchestrator.candidate_history,
-                "release_unfinished_candidate_claims",
-                side_effect=release_unfinished,
-            ))
-            stack.enter_context(patch.object(
-                orchestrator.website_presence_verifier,
-                "verify_business_website_presence",
-                new=verify_presence,
-            ))
-            stack.enter_context(patch.object(
-                orchestrator.social_checker,
-                "check_instagram",
-                new=AsyncMock(),
-            ))
             stack.enter_context(
-                patch.object(orchestrator.ai_scorer, "score_businesses", new=AsyncMock())
+                patch.object(
+                    orchestrator.collector,
+                    "collect_stream",
+                    new=fake_collect_stream,
+                )
             )
-            stack.enter_context(patch.object(
-                orchestrator.reporter,
-                "export_csv",
-                return_value="result.csv",
-            ))
-            stack.enter_context(patch.object(
-                orchestrator.reporter,
-                "export_excel",
-                side_effect=export_excel,
-            ))
-            stack.enter_context(patch.object(
-                orchestrator.reporter,
-                "format_leads_summary",
-                return_value="summary",
-            ))
-            stack.enter_context(patch.object(
-                orchestrator,
-                "finalize_completed_task",
-                new=AsyncMock(return_value=None),
-            ))
+            stack.enter_context(
+                patch.object(
+                    orchestrator.candidate_history,
+                    "canonical_scope_key_from_resolved",
+                    return_value="dentistry:kyiv",
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.candidate_history,
+                    "candidate_fingerprint",
+                    side_effect=lambda business, city: ("name", business.name),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.candidate_history,
+                    "claim_candidate",
+                    side_effect=claim_candidate,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.candidate_history,
+                    "mark_candidate_checked",
+                    side_effect=mark_checked,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.candidate_history,
+                    "release_candidate_claim",
+                    side_effect=release_claim,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.candidate_history,
+                    "release_unfinished_candidate_claims",
+                    side_effect=release_unfinished,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.website_presence_verifier,
+                    "verify_business_website_presence",
+                    new=verify_presence,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.social_checker,
+                    "check_instagram",
+                    new=AsyncMock(),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.ai_scorer, "score_businesses", new=AsyncMock()
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.reporter,
+                    "export_csv",
+                    return_value="result.csv",
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.reporter,
+                    "export_excel",
+                    side_effect=export_excel,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator.reporter,
+                    "format_leads_summary",
+                    return_value="summary",
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    orchestrator,
+                    "finalize_completed_task",
+                    new=AsyncMock(return_value=None),
+                )
+            )
             for task_id in (1, 2):
                 current_task_id = task_id
                 await orchestrator.run_search(

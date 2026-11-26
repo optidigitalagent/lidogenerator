@@ -53,7 +53,11 @@ from rendered_site_audit import (
 )
 from website_candidate_matching import SearchProvider
 from website_pipeline import (
-    LeadDecision, ResolverMode, SearchMode, parse_resolver_mode, qualify_lead,
+    LeadDecision,
+    ResolverMode,
+    SearchMode,
+    parse_resolver_mode,
+    qualify_lead,
 )
 from website_search_runtime import (
     build_configured_search_provider,
@@ -122,16 +126,17 @@ def _contactability_qualification_telemetry(
         "lead_email_only_count": lead_buckets.count("email_only"),
         "lead_multi_contact_count": lead_buckets.count("multi_contact"),
         "no_contact_count": sum(
-            not contactability.actionable
-            for contactability in candidate_contactability
+            not contactability.actionable for contactability in candidate_contactability
         ),
         "good_site_excluded_count": sum(
-            not business.is_lead and business.has_actionable_contact
+            not business.is_lead
+            and business.has_actionable_contact
             and business.website_status == "good website"
             for business in candidates
         ),
         "uncertain_site_excluded_count": sum(
-            not business.is_lead and business.has_actionable_contact
+            not business.is_lead
+            and business.has_actionable_contact
             and (
                 business.website_status == "uncertain website"
                 or business.lead_decision == LeadDecision.UNCERTAIN.value
@@ -286,13 +291,9 @@ def _first_party_shadow_telemetry(
         "missing_instagram_count": missing_instagram_count,
         "trusted_website_count": trusted_website_count,
         "attempted_businesses": sum(
-            1
-            for result in resolutions
-            if result.pages_attempted > 0
+            1 for result in resolutions if result.pages_attempted > 0
         ),
-        "found_official_count": status_counts[
-            FirstPartyInstagramStatus.FOUND_OFFICIAL
-        ],
+        "found_official_count": status_counts[FirstPartyInstagramStatus.FOUND_OFFICIAL],
         "not_found_count": status_counts[FirstPartyInstagramStatus.NOT_FOUND],
         "uncertain_count": status_counts[FirstPartyInstagramStatus.UNCERTAIN],
         "technical_error_count": status_counts[
@@ -326,7 +327,9 @@ async def _run_first_party_instagram_shadow(
         1
         for item in businesses
         if not item.instagram_url
-        and instagram_first_party_resolver.trusted_website_for_instagram_resolution(item)
+        and instagram_first_party_resolver.trusted_website_for_instagram_resolution(
+            item
+        )
         is not None
     )
     try:
@@ -399,9 +402,7 @@ def _first_party_apply_telemetry(
         "attempted_businesses": sum(
             1 for result in resolutions if result.pages_attempted > 0
         ),
-        "found_official_count": status_counts[
-            FirstPartyInstagramStatus.FOUND_OFFICIAL
-        ],
+        "found_official_count": status_counts[FirstPartyInstagramStatus.FOUND_OFFICIAL],
         "applied_count": len(applied_businesses),
         "legacy_lead_eligible_after_apply": sum(
             1 for business in applied_businesses if business.is_lead
@@ -451,11 +452,9 @@ async def _run_first_party_instagram_apply(
     try:
         resolutions: tuple[FirstPartyInstagramResolution, ...] = ()
         if eligible_businesses:
-            resolutions = (
-                await instagram_first_party_resolver.resolve_missing_instagrams_first_party(
-                    eligible_businesses,
-                    resolver=resolver,
-                )
+            resolutions = await instagram_first_party_resolver.resolve_missing_instagrams_first_party(
+                eligible_businesses,
+                resolver=resolver,
             )
         telemetry = _first_party_apply_telemetry(
             businesses,
@@ -621,13 +620,17 @@ class SearchStopped(Exception):
 class _Progress:
     """Копит состояние этапов и шлёт сообщение наружу не чаще, чем раз в interval сек."""
 
-    def __init__(self, callback: Optional[ReportCallback], interval: int,
-                 stop_event: Optional[asyncio.Event]):
+    def __init__(
+        self,
+        callback: Optional[ReportCallback],
+        interval: int,
+        stop_event: Optional[asyncio.Event],
+    ):
         self.callback = callback
         self.interval = interval
         self.stop_event = stop_event
-        self.lines: dict = {}          # этап -> текст строки
-        self._last_sent = 0.0          # время последней отправки
+        self.lines: dict = {}  # этап -> текст строки
+        self._last_sent = 0.0  # время последней отправки
 
     async def update(self, stage: str, line: str, force: bool = False) -> None:
         """Обновить строку этапа и отправить сводку, если пришло время."""
@@ -670,14 +673,15 @@ async def run_search(
         max_candidates=config.MAX_CHECKED_CANDIDATES_PER_TASK,
         max_discovery_cards=config.MAX_MAPS_CARDS_PER_TASK,
     )
-    interval = progress_interval if progress_interval is not None else config.PROGRESS_INTERVAL
+    interval = (
+        progress_interval if progress_interval is not None else config.PROGRESS_INTERVAL
+    )
     progress = _Progress(progress_callback, interval, stop_event)
     resolver_mode = parse_resolver_mode(config.WEBSITE_RESOLVER_MODE)
     search_mode = SearchMode(dict(task).get("search_mode", "WEBSITE_NEED"))
     all_companies = search_mode is SearchMode.ALL_COMPANIES
     verified_no_site = (
-        not all_companies
-        and config.LEAD_WEBSITE_POLICY == "verified_no_site_only"
+        not all_companies and config.LEAD_WEBSITE_POLICY == "verified_no_site_only"
     )
     if website_search_provider is not None:
         runtime_website_search_provider = website_search_provider
@@ -710,15 +714,15 @@ async def run_search(
     stop_flag = (lambda: stop_event.is_set()) if stop_event else None
 
     # Накопители по ходу батчевого сбора
-    leads: List[Business] = []          # валидные лиды (то, что попадёт в таблицу)
-    visited = 0                         # просмотрено бизнесов всего
-    checked_candidates = 0              # уникальные кандидаты с завершённой проверкой сайта
+    leads: List[Business] = []  # валидные лиды (то, что попадёт в таблицу)
+    visited = 0  # просмотрено бизнесов всего
+    checked_candidates = 0  # уникальные кандидаты с завершённой проверкой сайта
     first_party_instagrams_recovered = 0
     contactability_candidates: List[Business] = []
     skipped_no_contact = 0
-    skipped_no_instagram = 0            # пропущено: нет Instagram
-    skipped_good_site = 0               # пропущено: есть Instagram, но хороший сайт
-    skipped_uncertain_website = 0       # пропущено: результат сайта недостаточно надёжен
+    skipped_no_instagram = 0  # пропущено: нет Instagram
+    skipped_good_site = 0  # пропущено: есть Instagram, но хороший сайт
+    skipped_uncertain_website = 0  # пропущено: результат сайта недостаточно надёжен
     skipped_previously_checked = 0
     skipped_claimed_elsewhere = 0
     skipped_website_present = 0
@@ -746,11 +750,7 @@ async def run_search(
         city,
         city_catalog.CITY_DEFINITIONS,
     )
-    query_city = (
-        city_definition.canonical_name
-        if city_definition is not None
-        else city
-    )
+    query_city = city_definition.canonical_name if city_definition is not None else city
     history_scope = candidate_history.canonical_scope_key_from_resolved(
         niche_plan, city_definition, city
     )
@@ -765,7 +765,7 @@ async def run_search(
             return CandidateClaimResult.CLAIMED
         basis, key = candidate_history.candidate_fingerprint(business, query_city)
         result = candidate_history.claim_candidate(
-            history_scope, key, basis, task_id
+            history_scope, key, basis, task_id, instagram_url=business.instagram_url
         )
         if result is CandidateClaimResult.CLAIMED:
             claimed_history_keys[id(business)] = key
@@ -789,6 +789,22 @@ async def run_search(
             history_scope, key, task_id
         ):
             retryable_claim_releases += 1
+
+    def _save_qualified_leads() -> None:
+        pending = [business for business in leads if business.id is None]
+        if config.CANDIDATE_HISTORY_MODE == "apply":
+            db.save_businesses(
+                pending,
+                history_scope=history_scope,
+                history_claims=claimed_history_keys,
+            )
+            # Successful selected rows are terminal in the same transaction as
+            # persistence. Surplus/uncommitted claims remain eligible next time.
+            candidate_history.release_unfinished_candidate_claims(task_id)
+            claimed_history_keys.clear()
+        else:
+            db.save_businesses(pending)
+
     district_fragments = (
         tuple(
             district.query_text
@@ -805,7 +821,12 @@ async def run_search(
         "fallback_variants": niche_plan.fallback_variants,
     }
     if deep_discovery_enabled:
-        query_plan = build_query_plan(**query_arguments)
+        query_plan = build_query_plan(
+            **query_arguments,
+            local_areas=city_definition.local_areas
+            if city_definition is not None
+            else (),
+        )
         normal_query_queue = query_plan.normal_queries
         deep_query_queue = query_plan.deep_queries
     else:
@@ -841,9 +862,7 @@ async def run_search(
             "checkedCandidates": checked_candidates,
             "previouslyCheckedHistorySkips": skipped_previously_checked,
             "newCandidatesChecked": checked_candidates,
-            "newCandidateRatio": (
-                checked_candidates / visited if visited else 0.0
-            ),
+            "newCandidateRatio": (checked_candidates / visited if visited else 0.0),
             "taskDuplicateLinkRate": maps_discovery_session.task_duplicate_link_rate,
             "normalQueriesTotal": normal_queries_total,
             "normalQueriesCompleted": normal_queries_completed,
@@ -996,12 +1015,9 @@ async def run_search(
         nonlocal leads
 
         # The user stopped the search, so preserve any qualified partial results.
-        if config.CANDIDATE_HISTORY_MODE == "apply":
-            candidate_history.release_unfinished_candidate_claims(task_id)
-            claimed_history_keys.clear()
         leads = limit_to_target(leads, policy.target_leads)
         if leads:
-            db.save_businesses(leads)
+            _save_qualified_leads()
             for business in leads:
                 db.update_business(business)
         _persist_progress("stopped", final_stop_reason=StopReason.USER_STOPPED)
@@ -1072,9 +1088,7 @@ async def run_search(
                 remaining_checked_candidates=(
                     policy.max_candidates - checked_candidates
                 ),
-                remaining_opened_cards=(
-                    policy.max_discovery_cards - visited
-                ),
+                remaining_opened_cards=(policy.max_discovery_cards - visited),
                 active_queries=active_remaining_queries,
             )
             if query_budget.exhausted:
@@ -1110,7 +1124,15 @@ async def run_search(
                 discovery_session=maps_discovery_session,
                 # All-company candidates need no exclusion buffer. Start checking
                 # target=1 after one card, rather than opening fifteen first.
-                **({"batch_size": min(config.COLLECT_BATCH_SIZE, max(1, target_leads - len(leads)))} if all_companies else {}),
+                **(
+                    {
+                        "batch_size": min(
+                            config.COLLECT_BATCH_SIZE, max(1, target_leads - len(leads))
+                        )
+                    }
+                    if all_companies
+                    else {}
+                ),
             ):
                 decision = _decide(remaining_queries=active_remaining_queries)
                 if decision.stop_reason is StopReason.USER_STOPPED:
@@ -1121,10 +1143,12 @@ async def run_search(
                     business.search_mode = search_mode.value
                     key = _business_dedupe_key(business)
                     source_keys = {
-                        (kind, value.strip()) for kind, value in (
+                        (kind, value.strip())
+                        for kind, value in (
                             ("candidate", business.external_candidate_id),
                             ("place", business.google_place_id),
-                        ) if value.strip()
+                        )
+                        if value.strip()
                     }
                     if source_keys & seen_source_keys or (
                         key is not None and key in seen_business_keys
@@ -1172,7 +1196,9 @@ async def run_search(
                             runtime_presence_search_provider
                         )
                         if presence_budget is not None:
-                            website_presence_requests_used = presence_budget.used_requests
+                            website_presence_requests_used = (
+                                presence_budget.used_requests
+                            )
                         else:
                             website_presence_requests_used += result.requests_used
 
@@ -1184,7 +1210,9 @@ async def run_search(
                                 maps_presence_vetoes += 1
                             else:
                                 search_presence_vetoes += 1
-                            if any("hosted_builder" in item for item in result.evidence):
+                            if any(
+                                "hosted_builder" in item for item in result.evidence
+                            ):
                                 hosted_site_vetoes += 1
                             checked_candidates += 1
                             _history_checked(
@@ -1201,12 +1229,15 @@ async def run_search(
                             business.task_id = task_id
                             if business.is_lead:
                                 leads.append(business)
-                                _history_checked(business, "lead")
                             else:
-                                _history_checked(business, "other_deterministic_exclusion")
+                                _history_checked(
+                                    business, "other_deterministic_exclusion"
+                                )
                         elif result.status is WebsitePresenceStatus.TECHNICAL_ERROR:
                             business.lead_decision = LeadDecision.UNCERTAIN.value
-                            business.lead_decision_reason = "website_presence_technical_error"
+                            business.lead_decision_reason = (
+                                "website_presence_technical_error"
+                            )
                             skipped_uncertain_website += 1
                             website_presence_technical_errors += 1
                             _history_release(business)
@@ -1248,7 +1279,9 @@ async def run_search(
                                 has_actionable_contact=(
                                     _qualification_contact_available(business)
                                 ),
-                                resolution=website_resolver.resolution_from_business(business),
+                                resolution=website_resolver.resolution_from_business(
+                                    business
+                                ),
                                 audit=website_resolver.audit_from_business(business),
                                 search_mode=search_mode,
                             )
@@ -1263,14 +1296,15 @@ async def run_search(
                         if business.is_lead:
                             business.task_id = task_id
                             leads.append(business)
-                            _history_checked(business, "lead")
                         elif not _qualification_contact_available(business):
                             if config.LEAD_CONTACTABILITY_MODE == "instagram_only":
                                 skipped_no_instagram += 1
                                 _history_checked(business, "no_instagram")
                             else:
                                 skipped_no_contact += 1
-                                _history_checked(business, "other_deterministic_exclusion")
+                                _history_checked(
+                                    business, "other_deterministic_exclusion"
+                                )
                         elif business.website_status == "good website":
                             skipped_good_site += 1
                             _history_checked(business, "website_present_maps")
@@ -1333,18 +1367,23 @@ async def run_search(
         # --- Обогащение лидов (Instagram + AI-скоринг) — не влияет на отбор ---
         db.update_task_status(task_id, "scoring")
         _persist_progress("scoring", final_stop_reason=stop_reason)
-        db.save_businesses(leads)  # сохраняем лиды, получаем id
+        _save_qualified_leads()  # SQLite persistence and terminal history commit together.
 
         if leads:
+
             async def on_insta(done: int, total_: int):
-                await progress.update("enrich", f"📱 Перевірка Instagram лідів: {done}/{total_}...")
+                await progress.update(
+                    "enrich", f"📱 Перевірка Instagram лідів: {done}/{total_}..."
+                )
 
             await social_checker.check_instagram(
                 leads, progress_callback=on_insta, stop_flag=stop_flag
             )
 
             async def on_score(done: int, total_: int):
-                await progress.update("enrich", f"🤖 AI-оцінка лідів: {done}/{total_}...")
+                await progress.update(
+                    "enrich", f"🤖 AI-оцінка лідів: {done}/{total_}..."
+                )
 
             await ai_scorer.score_businesses(leads, progress_callback=on_score)
 
@@ -1390,9 +1429,7 @@ async def run_search(
             "maps_cards_actually_opened": visited,
             "previously_checked_history_skips": skipped_previously_checked,
             "new_candidates_checked": checked_candidates,
-            "new_candidate_ratio": (
-                checked_candidates / visited if visited else 0.0
-            ),
+            "new_candidate_ratio": (checked_candidates / visited if visited else 0.0),
             "task_duplicate_link_rate": (
                 maps_discovery_session.task_duplicate_link_rate
             ),
