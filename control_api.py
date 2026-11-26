@@ -35,6 +35,14 @@ _PROGRESS_COUNTERS = (
     "skippedNoInstagram",
     "recoveredInstagram",
     "remainingQueries",
+    "skippedPreviouslyChecked",
+    "skippedClaimedElsewhere",
+    "skippedWebsitePresent",
+    "websitePresenceRequestsUsed",
+    "websitePresenceRequestsMax",
+    "normalQueriesCompleted",
+    "normalQueriesTotal",
+    "mapsLinksSkippedTaskDuplicate",
 )
 
 
@@ -260,9 +268,12 @@ async def create_search(request: web.Request) -> web.Response:
     existing = db.get_task_by_control_key(key)
     if existing is not None:
         row = dict(existing)
-        if (
-            row["niche"], row["city"], int(row["count"]), row["search_mode"]
-        ) != (niche, city, target, mode):
+        if (row["niche"], row["city"], int(row["count"]), row["search_mode"]) != (
+            niche,
+            city,
+            target,
+            mode,
+        ):
             raise ControlError(
                 409,
                 "IDEMPOTENCY_KEY_REUSED",
@@ -283,9 +294,12 @@ async def create_search(request: web.Request) -> web.Response:
         if existing is None:
             raise
         row = dict(existing)
-        if (
-            row["niche"], row["city"], int(row["count"]), row["search_mode"]
-        ) != (niche, city, target, mode):
+        if (row["niche"], row["city"], int(row["count"]), row["search_mode"]) != (
+            niche,
+            city,
+            target,
+            mode,
+        ):
             raise ControlError(
                 409,
                 "IDEMPOTENCY_KEY_REUSED",
