@@ -1,0 +1,5 @@
+# R22 handoff
+
+Read PROJECT_STATE.md and approved ../tasks/OPTI-WEBSITE-NEED-RECOVERY-22.txt. This repository checkpoint is pre-release; final authoritative evidence is in the delivered OPTI-WEBSITE-NEED-RECOVERY-22_RESULT.zip, local recovery22 REPORT/ACCEPTANCE/PROJECT_STATE and immutable allowance receipts. Source checkpoints do not prove installed production or positive discovery.
+
+Preserve strict verified-no-site + Instagram, dedup/owners, current key/provider/caps/volume and R20/R21 UI/copy. No legacy ownership reassignment, history reset, historical Bridge replay, email expansion, PR42 merge or new ALL paid run. Never replay a launch/release script or carry prior allowances forward. R22 permits at most2 predeclared ordinary WEBSITE_NEED E01 target3 scenarios (Vinnytsia, optional Sumy); check actual used receipts before any action. A fresh-scope success does not establish affected-scope recovery. Zero-only evidence must remain PARTIAL. No user action is needed for routine approved engineering.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import unicodedata
 from collections.abc import Mapping
@@ -38,7 +39,11 @@ def _now() -> datetime:
 
 
 def _iso(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return (
+        value.astimezone(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _parse(value: str) -> datetime:
@@ -167,6 +172,27 @@ def initialize_history_schema(conn: sqlite3.Connection) -> None:
             ON candidate_history(claimed_by_task_id);
         CREATE INDEX IF NOT EXISTS idx_candidate_history_scope_state
             ON candidate_history(scope_key, state);
+
+        -- Additive audit only: older readers can keep using candidate_history.
+        -- Never discard the prior checked evidence when a fresh card warrants a recheck.
+        CREATE TABLE IF NOT EXISTS candidate_history_rechecks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_key TEXT NOT NULL,
+            candidate_key TEXT NOT NULL,
+            task_id INTEGER NOT NULL,
+            reason TEXT NOT NULL CHECK(reason IN ('instagram_now_available','website_uncertain')),
+            prior_history_json TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            UNIQUE(scope_key,candidate_key,task_id)
+        );
+        CREATE TRIGGER IF NOT EXISTS candidate_history_rechecks_no_update
+        BEFORE UPDATE ON candidate_history_rechecks BEGIN
+            SELECT RAISE(ABORT,'Candidate history recheck evidence is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS candidate_history_rechecks_no_delete
+        BEFORE DELETE ON candidate_history_rechecks BEGIN
+            SELECT RAISE(ABORT,'Candidate history recheck evidence is immutable');
+        END;
         """
     )
 
@@ -418,7 +444,11 @@ def reconcile_city_alias_scopes(
 def scope_for_search_mode(base_scope: str, search_mode: str) -> str:
     """Keep legacy website exclusions from vetoing all-company searches."""
     # v1 exclusions required Instagram; do not reuse those vetoes for public contacts.
-    return base_scope + ":all_companies:v2" if search_mode == "ALL_COMPANIES" else base_scope
+    return (
+        base_scope + ":all_companies:v2"
+        if search_mode == "ALL_COMPANIES"
+        else base_scope
+    )
 
 
 def backfill_persisted_leads(conn: sqlite3.Connection) -> int:
@@ -449,7 +479,15 @@ def backfill_persisted_leads(conn: sqlite3.Connection) -> int:
             "(scope_key,candidate_key,identity_basis,state,claimed_by_task_id,claim_expires_at,"
             "first_seen_at,last_seen_at,checked_at,last_outcome,times_seen) "
             "VALUES (?,?,?,'checked',NULL,NULL,?,?,?,?,1)",
-            (scope, key, basis, timestamp, timestamp, timestamp, "legacy_persisted_lead"),
+            (
+                scope,
+                key,
+                basis,
+                timestamp,
+                timestamp,
+                timestamp,
+                "legacy_persisted_lead",
+            ),
         )
         inserted += cursor.rowcount
         if cursor.rowcount == 0:
@@ -479,9 +517,14 @@ def claim_candidate(
     *,
     lease_seconds: int | None = None,
     now: datetime | None = None,
+    instagram_url: str | None = None,
 ) -> CandidateClaimResult:
     current = now or _now()
-    lease = lease_seconds if lease_seconds is not None else config.CANDIDATE_HISTORY_CLAIM_LEASE_SECONDS
+    lease = (
+        lease_seconds
+        if lease_seconds is not None
+        else config.CANDIDATE_HISTORY_CLAIM_LEASE_SECONDS
+    )
     timestamp = _iso(current)
     expires = _iso(current + timedelta(seconds=lease))
     conn = _connection()
@@ -496,16 +539,61 @@ def claim_candidate(
                 "INSERT INTO candidate_history "
                 "(scope_key,candidate_key,identity_basis,state,claimed_by_task_id,claim_expires_at,"
                 "first_seen_at,last_seen_at,times_seen) VALUES (?,?,?,'claimed',?,?,?,?,1)",
-                (scope_key, candidate_key, identity_basis, task_id, expires, timestamp, timestamp),
+                (
+                    scope_key,
+                    candidate_key,
+                    identity_basis,
+                    task_id,
+                    expires,
+                    timestamp,
+                    timestamp,
+                ),
             )
             result = CandidateClaimResult.CLAIMED
         elif row["state"] == "checked":
-            conn.execute(
-                "UPDATE candidate_history SET last_seen_at=?, times_seen=times_seen+1 "
-                "WHERE scope_key=? AND candidate_key=?",
-                (timestamp, scope_key, candidate_key),
-            )
-            result = CandidateClaimResult.ALREADY_CHECKED
+            # A valid negative or persisted lead has no blanket expiry. Recheck
+            # only a fresh observed public profile after contact exclusion, or
+            # an inconclusive site check; the real website verifier still runs.
+            reason = None
+            if normalized_instagram_profile(instagram_url):
+                if row["last_outcome"] == "no_instagram":
+                    reason = "instagram_now_available"
+                elif row["last_outcome"] == "website_uncertain":
+                    reason = "website_uncertain"
+            inserted = False
+            if reason:
+                inserted = (
+                    conn.execute(
+                        "INSERT OR IGNORE INTO candidate_history_rechecks "
+                        "(scope_key,candidate_key,task_id,reason,prior_history_json,observed_at) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (
+                            scope_key,
+                            candidate_key,
+                            task_id,
+                            reason,
+                            json.dumps(dict(row), sort_keys=True),
+                            timestamp,
+                        ),
+                    ).rowcount
+                    == 1
+                )
+            if inserted:
+                # Keep old checked_at/outcome until a new conclusion commits.
+                conn.execute(
+                    "UPDATE candidate_history SET state='claimed',claimed_by_task_id=?,"
+                    "claim_expires_at=?,last_seen_at=?,times_seen=times_seen+1 "
+                    "WHERE scope_key=? AND candidate_key=?",
+                    (task_id, expires, timestamp, scope_key, candidate_key),
+                )
+                result = CandidateClaimResult.CLAIMED
+            else:
+                conn.execute(
+                    "UPDATE candidate_history SET last_seen_at=?, times_seen=times_seen+1 "
+                    "WHERE scope_key=? AND candidate_key=?",
+                    (timestamp, scope_key, candidate_key),
+                )
+                result = CandidateClaimResult.ALREADY_CHECKED
         elif row["claimed_by_task_id"] == task_id or (
             row["claim_expires_at"] and _parse(row["claim_expires_at"]) <= current
         ):
@@ -555,12 +643,18 @@ def mark_candidate_checked(
 def release_candidate_claim(scope_key: str, candidate_key: str, task_id: int) -> bool:
     conn = _connection()
     try:
+        restored = conn.execute(
+            "UPDATE candidate_history SET state='checked',claimed_by_task_id=NULL,claim_expires_at=NULL "
+            "WHERE scope_key=? AND candidate_key=? AND state='claimed' AND claimed_by_task_id=? "
+            "AND checked_at IS NOT NULL",
+            (scope_key, candidate_key, task_id),
+        ).rowcount
         cursor = conn.execute(
             "DELETE FROM candidate_history WHERE scope_key=? AND candidate_key=? "
             "AND state='claimed' AND claimed_by_task_id=?",
             (scope_key, candidate_key, task_id),
         )
-        return cursor.rowcount == 1
+        return restored + cursor.rowcount == 1
     finally:
         conn.close()
 
@@ -568,10 +662,17 @@ def release_candidate_claim(scope_key: str, candidate_key: str, task_id: int) ->
 def release_unfinished_candidate_claims(task_id: int) -> int:
     conn = _connection()
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        restored = conn.execute(
+            "UPDATE candidate_history SET state='checked',claimed_by_task_id=NULL,claim_expires_at=NULL "
+            "WHERE state='claimed' AND claimed_by_task_id=? AND checked_at IS NOT NULL",
+            (task_id,),
+        ).rowcount
         cursor = conn.execute(
             "DELETE FROM candidate_history WHERE state='claimed' AND claimed_by_task_id=?",
             (task_id,),
         )
-        return cursor.rowcount
+        conn.commit()
+        return restored + cursor.rowcount
     finally:
         conn.close()

@@ -214,12 +214,8 @@ def _migrate_tasks(conn: sqlite3.Connection) -> None:
         "UPDATE tasks SET initiated_via = 'TELEGRAM' "
         "WHERE initiated_via IS NULL OR initiated_via NOT IN ('TELEGRAM', 'OPTI')"
     )
-    conn.execute(
-        "UPDATE tasks SET progress_json = '{}' WHERE progress_json IS NULL"
-    )
-    conn.execute(
-        "UPDATE tasks SET updated_at = created_at WHERE updated_at IS NULL"
-    )
+    conn.execute("UPDATE tasks SET progress_json = '{}' WHERE progress_json IS NULL")
+    conn.execute("UPDATE tasks SET updated_at = created_at WHERE updated_at IS NULL")
     rows = conn.execute(
         "SELECT id, created_at FROM tasks WHERE external_batch_id IS NULL"
     ).fetchall()
@@ -242,9 +238,7 @@ def _migrate_tasks(conn: sqlite3.Connection) -> None:
 
 def _migrate_businesses(conn: sqlite3.Connection) -> None:
     """Add Phase 3 columns to an existing table without rebuilding it."""
-    existing = {
-        row["name"] for row in conn.execute("PRAGMA table_info(businesses)")
-    }
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(businesses)")}
     for name, declaration in _BUSINESS_MIGRATIONS.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE businesses ADD COLUMN {name} {declaration}")
@@ -252,11 +246,10 @@ def _migrate_businesses(conn: sqlite3.Connection) -> None:
 
 # ---------- Задачи ----------
 
+
 def _timestamp() -> str:
     return (
-        datetime.now(timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z")
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     )
 
 
@@ -277,6 +270,7 @@ def create_task(
 ) -> int:
     """Создать задачу поиска, вернуть её id."""
     from website_pipeline import SearchMode
+
     search_mode = SearchMode(search_mode).value
     with _connect() as conn:
         cur = conn.execute(
@@ -311,11 +305,7 @@ def update_task_status(
     error_message: str | None = None,
 ) -> None:
     """Обновить статус задачи; для финальных статусов проставить время окончания."""
-    finished = (
-        _timestamp()
-        if status in TERMINAL_TASK_STATUSES
-        else None
-    )
+    finished = _timestamp() if status in TERMINAL_TASK_STATUSES else None
     with _connect() as conn:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
         assignments = [
@@ -332,7 +322,9 @@ def update_task_status(
             parameters.append(error_code[:100] if error_code else None)
         if "last_error_message" in columns:
             assignments.append("last_error_message = ?")
-            parameters.append(_safe_error_message(error_message) if error_message else None)
+            parameters.append(
+                _safe_error_message(error_message) if error_message else None
+            )
         parameters.append(task_id)
         conn.execute(
             f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?",
@@ -355,9 +347,7 @@ def update_task_progress(task_id: int, progress: dict) -> None:
             return
         updated = ", updated_at = ?" if "updated_at" in columns else ""
         parameters: tuple[object, ...] = (
-            (payload, _timestamp(), task_id)
-            if updated
-            else (payload, task_id)
+            (payload, _timestamp(), task_id) if updated else (payload, task_id)
         )
         conn.execute(
             f"UPDATE tasks SET progress_json = ?{updated} WHERE id = ?",
@@ -448,26 +438,63 @@ def get_completed_tasks_for_opti_reconciliation(limit: int = 100) -> List[sqlite
 
 _BUSINESS_COLUMNS = (
     "search_mode",
-    "task_id", "name", "niche", "city", "phone", "address", "category", "email", "website",
-    "instagram_url", "google_maps_url", "google_place_id", "external_candidate_id",
-    "collected_at", "rating", "reviews_count", "has_site", "site_quality",
-    "instagram_active", "followers", "posts_count", "last_post_days",
-    "ai_score", "ai_priority", "ai_reason",
-    "website_original_url", "instagram_bio_url", "website_resolved_url",
-    "website_final_url", "website_resolution_status", "website_resolution_source",
-    "website_resolution_confidence", "website_resolution_evidence",
-    "website_resolution_error", "website_audit_status",
-    "website_audit_http_status", "website_audit_evidence", "website_audit_error",
-    "lead_decision", "lead_decision_reason",
-    "website_presence_status", "website_presence_source",
-    "website_presence_resolved_url", "website_presence_evidence",
+    "task_id",
+    "name",
+    "niche",
+    "city",
+    "phone",
+    "address",
+    "category",
+    "email",
+    "website",
+    "instagram_url",
+    "google_maps_url",
+    "google_place_id",
+    "external_candidate_id",
+    "collected_at",
+    "rating",
+    "reviews_count",
+    "has_site",
+    "site_quality",
+    "instagram_active",
+    "followers",
+    "posts_count",
+    "last_post_days",
+    "ai_score",
+    "ai_priority",
+    "ai_reason",
+    "website_original_url",
+    "instagram_bio_url",
+    "website_resolved_url",
+    "website_final_url",
+    "website_resolution_status",
+    "website_resolution_source",
+    "website_resolution_confidence",
+    "website_resolution_evidence",
+    "website_resolution_error",
+    "website_audit_status",
+    "website_audit_http_status",
+    "website_audit_evidence",
+    "website_audit_error",
+    "lead_decision",
+    "lead_decision_reason",
+    "website_presence_status",
+    "website_presence_source",
+    "website_presence_resolved_url",
+    "website_presence_evidence",
     "website_presence_error",
 )
 
 
-def save_businesses(businesses: List[Business]) -> int:
+def save_businesses(
+    businesses: List[Business],
+    *,
+    history_scope: str | None = None,
+    history_claims: dict[int, str] | None = None,
+) -> int:
     """Сохранить список бизнесов. Дубликаты по телефону пропускаются. Вернуть число сохранённых."""
     saved = 0
+    committed_ids = []
     with _connect() as conn:
         for b in businesses:
             data = b.to_dict()
@@ -479,11 +506,33 @@ def save_businesses(businesses: List[Business]) -> int:
                     f"VALUES ({placeholders})",
                     values,
                 )
-                b.id = cur.lastrowid
-                saved += 1
-            except sqlite3.IntegrityError:
-                # Дубликат телефона внутри задачи — пропускаем
+            except sqlite3.IntegrityError as error:
+                # Only the established same-task phone uniqueness is a dedup.
+                if error.sqlite_errorcode != sqlite3.SQLITE_CONSTRAINT_UNIQUE:
+                    raise
                 continue
+            business_id = cur.lastrowid
+            if history_scope is not None and history_claims is not None:
+                key = history_claims.get(id(b))
+                if key is None:
+                    raise RuntimeError("Qualified business has no owned history claim")
+                timestamp = (
+                    datetime.now(timezone.utc)
+                    .isoformat(timespec="seconds")
+                    .replace("+00:00", "Z")
+                )
+                changed = conn.execute(
+                    "UPDATE candidate_history SET state='checked',claimed_by_task_id=NULL,"
+                    "claim_expires_at=NULL,checked_at=?,last_seen_at=?,last_outcome='lead' "
+                    "WHERE scope_key=? AND candidate_key=? AND state='claimed' AND claimed_by_task_id=?",
+                    (timestamp, timestamp, history_scope, key, b.task_id),
+                ).rowcount
+                if changed != 1:
+                    raise RuntimeError("Qualified business history claim was lost")
+            committed_ids.append((b, business_id))
+            saved += 1
+    for business, business_id in committed_ids:
+        business.id = business_id
     return saved
 
 
@@ -504,19 +553,38 @@ def update_business(b: Business) -> None:
             "website_presence_source=?, website_presence_resolved_url=?, "
             "website_presence_evidence=?, website_presence_error=? WHERE id=?",
             (
-                b.website, int(b.has_site), b.site_quality, int(b.instagram_active),
-                b.followers, b.posts_count, b.last_post_days,
-                b.ai_score, b.ai_priority, b.ai_reason,
-                b.instagram_url, b.website_original_url, b.instagram_bio_url,
-                b.website_resolved_url, b.website_final_url,
-                b.website_resolution_status, b.website_resolution_source,
-                b.website_resolution_confidence, b.website_resolution_evidence,
-                b.website_resolution_error, b.website_audit_status,
-                b.website_audit_http_status, b.website_audit_evidence,
-                b.website_audit_error, b.lead_decision, b.lead_decision_reason,
-                b.website_presence_status, b.website_presence_source,
-                b.website_presence_resolved_url, b.website_presence_evidence,
-                b.website_presence_error, b.id,
+                b.website,
+                int(b.has_site),
+                b.site_quality,
+                int(b.instagram_active),
+                b.followers,
+                b.posts_count,
+                b.last_post_days,
+                b.ai_score,
+                b.ai_priority,
+                b.ai_reason,
+                b.instagram_url,
+                b.website_original_url,
+                b.instagram_bio_url,
+                b.website_resolved_url,
+                b.website_final_url,
+                b.website_resolution_status,
+                b.website_resolution_source,
+                b.website_resolution_confidence,
+                b.website_resolution_evidence,
+                b.website_resolution_error,
+                b.website_audit_status,
+                b.website_audit_http_status,
+                b.website_audit_evidence,
+                b.website_audit_error,
+                b.lead_decision,
+                b.lead_decision_reason,
+                b.website_presence_status,
+                b.website_presence_source,
+                b.website_presence_resolved_url,
+                b.website_presence_evidence,
+                b.website_presence_error,
+                b.id,
             ),
         )
 

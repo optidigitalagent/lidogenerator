@@ -91,8 +91,7 @@ class DistrictDefinition:
         )
         if type(self.enabled) is not bool:
             raise TypeError(
-                "enabled must be a boolean, "
-                f"not {type(self.enabled).__name__}"
+                f"enabled must be a boolean, not {type(self.enabled).__name__}"
             )
 
 
@@ -132,6 +131,8 @@ class CityDefinition:
     canonical_name: str
     aliases: tuple[str, ...]
     districts: tuple[DistrictDefinition, ...]
+    # Curated local search fragments, not a statement of official districts.
+    local_areas: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "key", _validate_identifier(self.key, "key"))
@@ -148,8 +149,7 @@ class CityDefinition:
 
         if not isinstance(self.districts, tuple):
             raise TypeError(
-                "districts must be a tuple, "
-                f"not {type(self.districts).__name__}"
+                f"districts must be a tuple, not {type(self.districts).__name__}"
             )
         for index, district in enumerate(self.districts):
             if not isinstance(district, DistrictDefinition):
@@ -158,6 +158,12 @@ class CityDefinition:
                     f"not {type(district).__name__}"
                 )
         _validate_district_integrity(self.districts)
+        if not isinstance(self.local_areas, tuple):
+            raise TypeError("local_areas must be a tuple")
+        for area in self.local_areas:
+            _normalize_spacing(area, "local_area")
+        if len({area.casefold() for area in self.local_areas}) != len(self.local_areas):
+            raise ValueError("local_areas must be distinct")
 
 
 CITY_DEFINITIONS: tuple[CityDefinition, ...] = (
@@ -379,6 +385,8 @@ CITY_DEFINITIONS: tuple[CityDefinition, ...] = (
         canonical_name="Вінниця",
         aliases=("Винница", "Виница", "Vinnytsia", "Vinnitsa"),
         districts=(),
+        # VMR local-area names: https://vmr.gov.ua/vinnytski-starostynski-okruhy
+        local_areas=("Вишенька", "Замостя", "Старе місто"),
     ),
     CityDefinition(
         key="chernihiv",
@@ -485,10 +493,7 @@ def build_district_index(
     """Build a fresh exact-match district index scoped to one city."""
 
     if not isinstance(city, CityDefinition):
-        raise TypeError(
-            "city must be a CityDefinition, "
-            f"not {type(city).__name__}"
-        )
+        raise TypeError(f"city must be a CityDefinition, not {type(city).__name__}")
 
     index: dict[str, DistrictDefinition] = {}
     for district in city.districts:
@@ -520,8 +525,5 @@ def enabled_districts(
     """Return enabled districts in their declared order."""
 
     if not isinstance(city, CityDefinition):
-        raise TypeError(
-            "city must be a CityDefinition, "
-            f"not {type(city).__name__}"
-        )
+        raise TypeError(f"city must be a CityDefinition, not {type(city).__name__}")
     return tuple(district for district in city.districts if district.enabled)
