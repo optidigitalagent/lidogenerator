@@ -59,6 +59,42 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
     def auth(self):
         return {"Authorization": f"Bearer {TOKEN}"}
 
+    async def test_exhausted_history_only_incident_progress_survives_http(self):
+        task_id = db.create_task("стоматологія", "винница", 20)
+        db.update_task_progress(
+            task_id,
+            {
+                "stage": "done",
+                "visitedBusinesses": 141,
+                "checkedCandidates": 0,
+                "qualifiedLeads": 0,
+                "skippedPreviouslyChecked": 138,
+                "skippedClaimedElsewhere": 0,
+                "normalQueriesCompleted": 7,
+                "normalQueriesTotal": 7,
+                "websitePresenceRequestsUsed": 0,
+                "websitePresenceRequestsMax": 150,
+                "skippedWebsitePresent": 0,
+                "mapsLinksSkippedTaskDuplicate": 304,
+                "stopReason": "queries_exhausted",
+                "privateTrace": TOKEN,
+            },
+        )
+        db.update_task_status(task_id, "done")
+        search_id = db.get_task(task_id)["external_batch_id"]
+        response = await self.client.get(
+            f"/internal/opti/v1/searches/{search_id}", headers=self.auth()
+        )
+        self.assertEqual(200, response.status)
+        dto = await response.json()
+        self.assertEqual(138, dto["progress"].get("skippedPreviouslyChecked"))
+        self.assertEqual(7, dto["progress"].get("normalQueriesCompleted"))
+        self.assertEqual(0, dto["progress"].get("websitePresenceRequestsUsed"))
+        self.assertEqual("queries_exhausted", dto["progress"]["stopReason"])
+        self.assertEqual("done", dto["status"])
+        self.assertEqual("NOT_ENQUEUED", dto["sync"]["status"])
+        self.assertNotIn(TOKEN, json.dumps(dto))
+
     async def test_mode_is_durable_per_job_and_part_of_idempotency(self):
         path = "/internal/opti/v1/searches"
         headers = {**self.auth(), "Idempotency-Key": "mode-test"}
@@ -67,14 +103,26 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         dto = await response.json()
         self.assertEqual(201, response.status)
         self.assertEqual("ALL_COMPANIES", dto["searchMode"])
-        self.assertEqual("ALL_COMPANIES", db.get_task_by_search_id(dto["searchId"])["search_mode"])
-        replay = await self.client.post(path, headers=headers, json={**payload, "searchMode": "ALL_COMPANIES"})
+        self.assertEqual(
+            "ALL_COMPANIES", db.get_task_by_search_id(dto["searchId"])["search_mode"]
+        )
+        replay = await self.client.post(
+            path, headers=headers, json={**payload, "searchMode": "ALL_COMPANIES"}
+        )
         self.assertEqual(200, replay.status)
-        conflict = await self.client.post(path, headers=headers, json={**payload, "searchMode": "WEBSITE_NEED"})
+        conflict = await self.client.post(
+            path, headers=headers, json={**payload, "searchMode": "WEBSITE_NEED"}
+        )
         self.assertEqual(409, conflict.status)
         old = db.create_task("old", "Kyiv", 1)
-        self.assertEqual("WEBSITE_NEED", search_dto(dict(db.get_task(old)))["searchMode"])
-        invalid = await self.client.post(path, headers={**self.auth(), "Idempotency-Key": "invalid-mode"}, json={**payload, "searchMode": "INVALID"})
+        self.assertEqual(
+            "WEBSITE_NEED", search_dto(dict(db.get_task(old)))["searchMode"]
+        )
+        invalid = await self.client.post(
+            path,
+            headers={**self.auth(), "Idempotency-Key": "invalid-mode"},
+            json={**payload, "searchMode": "INVALID"},
+        )
         self.assertEqual(400, invalid.status)
 
     async def test_health_public_and_bearer_auth(self):
